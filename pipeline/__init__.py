@@ -10,7 +10,7 @@ Import everything you need from this package:
 
 from ._core import SDK_ROOT, load_credentials, check_tsx, login
 from ._sources import list_sources
-from ._artifacts import create_artifacts, load_jobs, poll_jobs, download_artifacts
+from ._artifacts import create_artifacts, load_jobs, poll_jobs, download_artifacts, list_artifacts, rename_single_source_artifacts
 
 __all__ = [
     "SDK_ROOT",
@@ -22,4 +22,6 @@ __all__ = [
     "load_jobs",
     "poll_jobs",
     "download_artifacts",
+    "list_artifacts",
+    "rename_single_source_artifacts",
 ]

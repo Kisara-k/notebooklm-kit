@@ -452,3 +452,225 @@ await sdk.dispose();
             print(f"  x  {e['sourceTitle']}: {e['error']}")
     print(sep)
     return results
+
+
+# ---------------------------------------------------------------------------
+# Inventory: list artifacts in a notebook
+# ---------------------------------------------------------------------------
+
+# ArtifactType enum (TS src/types/artifact.ts) → display label
+_ARTIFACT_TYPE_LABELS = {
+    0: "UNKNOWN", 1: "REPORT", 5: "QUIZ", 6: "FLASHCARDS",
+    7: "MIND_MAP", 8: "INFOGRAPHIC", 9: "SLIDE_DECK",
+    10: "AUDIO", 11: "VIDEO",
+}
+
+
+def list_artifacts(notebook_id: str, sources: list[dict], creds: dict) -> list[dict]:
+    """Return all artifacts in *notebook_id* and print a table.
+
+    Each artifact's ``sourceIds`` is displayed as comma-separated indices into
+    the supplied *sources* list (same list returned by ``list_sources``).
+    Sources not present in that list show as ``?``.
+
+    Returns the raw artifact list (dicts with ``artifactId``, ``title``, ``type``,
+    ``state``, ``sourceIds``, ``createdAt``, ``updatedAt``).
+    """
+    script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+
+{_ts_client(creds)}
+
+const arts = await sdk.artifacts.list('{notebook_id}');
+const out = arts.map(a => ({{
+  artifactId: a.artifactId,
+  title:      a.title ?? '',
+  type:       a.type ?? 0,
+  state:      a.state ?? 0,
+  sourceIds:  a.sourceIds ?? [],
+  createdAt:  a.createdAt ?? '',
+  updatedAt:  a.updatedAt ?? '',
+}}));
+console.log('__DATA__' + JSON.stringify(out) + '__DATA__');
+await sdk.dispose();
+"""
+    raw = run_ts("_tmp_list_artifacts", script)
+    artifacts = json.loads(raw[raw.find("__DATA__") + 8 : raw.rfind("__DATA__")])
+
+    # Build sourceId → index lookup from the sources table
+    idx_of = {s["sourceId"]: i for i, s in enumerate(sources)}
+
+    def _fmt_created(iso: str) -> str:
+        if not iso:
+            print(f"⚠ FALLBACK: artifact has empty createdAt — column will show '(unknown)'")
+            return "(unknown)"
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            print(f"⚠ FALLBACK: could not parse createdAt {iso!r} ({e}); showing raw")
+            return iso
+
+    def _fmt_sources(sids: list[str]) -> str:
+        parts = []
+        for sid in sids:
+            if sid in idx_of:
+                parts.append(str(idx_of[sid]))
+            else:
+                print(f"⚠ FALLBACK: artifact references sourceId {sid!r} not present in the sources list — shown as '?'")
+                parts.append("?")
+        return ",".join(parts) if parts else "(none)"
+
+    rows = []
+    for a in artifacts:
+        type_code = a["type"]
+        if type_code not in _ARTIFACT_TYPE_LABELS:
+            print(f"⚠ FALLBACK: unknown artifact type code {type_code!r} for '{a['title']}' — displaying raw value")
+        rows.append({
+            "title":     a["title"] or "(untitled)",
+            "type":      _ARTIFACT_TYPE_LABELS.get(type_code, str(type_code)),
+            "created":   _fmt_created(a["createdAt"]),
+            "sources":   _fmt_sources(a["sourceIds"]),
+            "artifactId": a["artifactId"],
+        })
+
+    col_t = max((len(r["title"]) for r in rows), default=5)
+    col_t = max(col_t, 5)
+    col_y = max((len(r["type"]) for r in rows), default=4)
+    col_y = max(col_y, 4)
+    col_s = max((len(r["sources"]) for r in rows), default=7)
+    col_s = max(col_s, 7)
+    UUID  = 36
+
+    sep = f"+----+{'-' * (col_t + 2)}+{'-' * (col_y + 2)}+---------------------+{'-' * (col_s + 2)}+{'-' * (UUID + 2)}+"
+    print(f"\nArtifacts in notebook {notebook_id} ({len(rows)} total)")
+    print(sep)
+    print(f"| {'#':2} | {'Title':{col_t}} | {'Type':{col_y}} | {'Created':19} | {'Sources':{col_s}} | {'Artifact ID':{UUID}} |")
+    print(sep)
+    for i, r in enumerate(rows):
+        print(f"| {i:2} | {r['title']:{col_t}} | {r['type']:{col_y}} | {r['created']:19} | {r['sources']:{col_s}} | {r['artifactId']:{UUID}} |")
+    print(sep)
+    return artifacts
+
+
+# ---------------------------------------------------------------------------
+# Rename single-source artifacts to "<source title> YYMMDD HHMM"
+# ---------------------------------------------------------------------------
+
+def rename_single_source_artifacts(
+    artifacts: "list[dict] | dict",
+    sources: list[dict],
+    creds: dict,
+    *,
+    indices: list[int] | None = None,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Rename every single-source artifact to ``<source title> YYMMDD HHMM``.
+
+    Args:
+        artifacts: list returned by ``list_artifacts``, a single artifact dict,
+                   or any plain list of artifact dicts (e.g. ``artifacts[2:5]``).
+        sources:   list returned by ``list_sources`` (used to resolve the source title).
+        creds:     credentials dict.
+        indices:   optional subset of artifact indices (rows in the artifacts table)
+                   to consider; ``None`` means all.
+        dry_run:   if True, prints the planned renames without calling the SDK.
+
+    Returns a list of ``{artifactId, oldTitle, newTitle, status}`` dicts.
+    """
+    # Accept a single artifact dict or any iterable of dicts
+    if isinstance(artifacts, dict):
+        artifacts = [artifacts]
+
+    title_of = {s["sourceId"]: s["title"] for s in sources}
+
+    targets: list[dict] = []
+    for i, a in enumerate(artifacts):
+        if indices is not None and i not in indices:
+            continue
+        sids = a.get("sourceIds") or []
+        if len(sids) != 1:
+            continue
+        sid = sids[0]
+        if sid not in title_of:
+            print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' references unknown sourceId {sid!r} — skipped")
+            continue
+        created = a.get("createdAt") or ""
+        if not created:
+            print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has empty createdAt — skipped (cannot build timestamp)")
+            continue
+        try:
+            dt = datetime.fromisoformat(created.replace("Z", "+00:00")).astimezone()
+        except Exception as e:
+            print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has unparseable createdAt {created!r} ({e}) — skipped")
+            continue
+        new_title = f"{title_of[sid][:30]} {dt.strftime('%y%m%d %H%M')}"
+        if new_title in (a.get("title") or ""):
+            continue  # already contains the canonical name (may have extra prefix/suffix)
+        targets.append({
+            "index":      i,
+            "artifactId": a["artifactId"],
+            "oldTitle":   a.get("title") or "",
+            "newTitle":   new_title,
+        })
+
+    if not targets:
+        print("No single-source artifacts to rename.")
+        return []
+
+    col_o = max(len(t["oldTitle"]) for t in targets)
+    col_n = max(len(t["newTitle"]) for t in targets)
+    col_o = max(col_o, 8)
+    col_n = max(col_n, 8)
+    sep = f"+----+{'-' * (col_o + 2)}+{'-' * (col_n + 2)}+----------+"
+    print(f"\n{'DRY RUN — ' if dry_run else ''}Renaming {len(targets)} single-source artifact(s)")
+    print(sep)
+    print(f"| {'#':2} | {'Old title':{col_o}} | {'New title':{col_n}} | {'Status':8} |")
+    print(sep)
+
+    if dry_run:
+        for t in targets:
+            print(f"| {t['index']:2} | {t['oldTitle']:{col_o}} | {t['newTitle']:{col_n}} | {'planned':8} |")
+        print(sep)
+        return targets
+
+    # Build a single TS script that renames everything in one tsx invocation
+    payload = json.dumps([{"artifactId": t["artifactId"], "newTitle": t["newTitle"]} for t in targets])
+    script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+
+{_ts_client(creds)}
+
+const targets = {payload};
+const results: Array<{{ artifactId: string; status: string; error?: string }}> = [];
+for (const t of targets) {{
+  try {{
+    const a = await sdk.artifacts.rename(t.artifactId, t.newTitle);
+    results.push({{ artifactId: t.artifactId, status: 'ok' }});
+  }} catch (e: any) {{
+    results.push({{ artifactId: t.artifactId, status: 'error', error: String(e?.message ?? e) }});
+  }}
+}}
+console.log('__DATA__' + JSON.stringify(results) + '__DATA__');
+await sdk.dispose();
+"""
+    raw = run_ts("_tmp_rename_artifacts", script)
+    results = json.loads(raw[raw.find("__DATA__") + 8 : raw.rfind("__DATA__")])
+    status_by_id = {r["artifactId"]: r for r in results}
+
+    out: list[dict] = []
+    for t in targets:
+        r = status_by_id.get(t["artifactId"], {"status": "missing"})
+        status = r["status"]
+        print(f"| {t['index']:2} | {t['oldTitle']:{col_o}} | {t['newTitle']:{col_n}} | {status:8} |")
+        if status == "error":
+            print(f"     error: {r.get('error', '')}")
+        out.append({**t, "status": status, "error": r.get("error")})
+        # Reflect the change in the in-memory artifacts list so re-printing shows new title
+        if status == "ok":
+            artifacts[t["index"]]["title"] = t["newTitle"]
+    print(sep)
+    return out
+
+
+
