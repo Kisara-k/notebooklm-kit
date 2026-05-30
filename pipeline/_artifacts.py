@@ -68,6 +68,7 @@ def create_artifacts(
     Job IDs are automatically saved to ``jobs/<type>/<yyyymmdd_hhmmss>_jobs.json``.
     Use :func:`load_jobs` to reload them in a later session.
     """
+    artifact_type = artifact_type.upper()
     label = artifact_type.replace("_", " ").title()
     script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
@@ -120,6 +121,7 @@ def load_jobs(artifact_type: str, filename: str | None = None) -> list[dict]:
         filename:      Specific filename inside ``jobs/<type>/``.
                        If omitted, the most recent file in that folder is used.
     """
+    artifact_type = artifact_type.upper()
     d = _jobs_dir(artifact_type)
     if filename is not None:
         p = d / filename
@@ -223,6 +225,7 @@ def download_artifacts(
     Returns:
         List of ``{sourceTitle, filePath}`` for successfully downloaded artifacts.
     """
+    artifact_type = artifact_type.upper()
     if output_dir is None:
         output_dir = SDK_ROOT / "outputs" / artifact_type.lower()
     output_dir.mkdir(parents=True, exist_ok=True)
