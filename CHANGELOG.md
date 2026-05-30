@@ -60,8 +60,15 @@ Generates one video per source in a notebook and downloads them as MP4.
 
 ## Authentication
 
-First run: `python pipeline/login.py` — opens a browser window, logs in to Google, saves `credentials.json`.  
-Subsequent runs: `load_credentials(mode="patchright")` reads the saved cookies and fetches a fresh auth token automatically.
+Two modes are supported — use whichever fits your setup:
+
+**Patchright (recommended)**  
+Run `python pipeline/login.py` once — opens a browser window, you log in to Google, session cookies are saved to `credentials.json`.  
+All subsequent runs call `load_credentials(mode="patchright")`, which reads `credentials.json` and fetches a fresh auth token automatically. No browser opens again until cookies expire.
+
+**Cookies (`.env`)**  
+Add `NOTEBOOKLM_AUTH_TOKEN` and `NOTEBOOKLM_COOKIES` to `.env` (copy from your browser's DevTools), then call `load_credentials(mode="cookies")`.  
+You must manually update these values whenever they expire.
 
 ---
 
