@@ -42,6 +42,8 @@ await sdk.dispose();
     print(f"| # | {'Title':{col_t}} | {'Status':10} | {'Source ID':{UUID}} |")
     print(sep)
     for i, s in enumerate(sources):
+        if s["status"] not in _STATUS:
+            print(f"⚠ FALLBACK: unknown source status code {s['status']!r} for '{s['title']}' — displaying raw value")
         status = _STATUS.get(s["status"], str(s["status"]))
         print(f"| {i} | {s['title']:{col_t}} | {status:10} | {s['sourceId']:{UUID}} |")
     print(sep)

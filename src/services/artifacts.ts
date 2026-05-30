@@ -2693,6 +2693,30 @@ export class ArtifactsService {
       }
     }
     
+    // Parse timestamps from Protobuf Timestamp pairs [seconds, nanos].
+    // The raw RPC array contains two such pairs; their positions vary by artifact type
+    // (e.g. [10]/[15] for QUIZ/FLASHCARDS, [8]/[13] for VIDEO), so scan for all of them.
+    // Smallest seconds value = createdAt, largest = updatedAt.
+    {
+      const tsPairs: number[] = [];
+      for (let i = 5; i < data.length; i++) {
+        const el = data[i];
+        if (
+          Array.isArray(el) && el.length >= 1 &&
+          typeof el[0] === 'number' && el[0] > 1_000_000_000 &&
+          (el.length === 1 || typeof el[1] === 'number')
+        ) {
+          tsPairs.push(el[0] * 1000 + Math.floor((el[1] ?? 0) / 1_000_000));
+        }
+      }
+      if (tsPairs.length >= 1) {
+        const minMs = Math.min(...tsPairs);
+        const maxMs = Math.max(...tsPairs);
+        artifact.createdAt = new Date(minMs).toISOString();
+        if (maxMs !== minMs) artifact.updatedAt = new Date(maxMs).toISOString();
+      }
+    }
+
     // Only return if we have an ID
     if (artifact.artifactId) {
       return artifact;

@@ -59,15 +59,27 @@ def _parse_created_at(created_at: str) -> str:
     try:
         dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
         return dt.astimezone().strftime("%Y%m%d_%H%M%S")
-    except Exception:
-        return _ts_now()
+    except Exception as e:
+        ts = _ts_now()
+        print(f"⚠ FALLBACK: _parse_created_at could not parse {created_at!r} ({e}); using current time {ts}")
+        return ts
 
 
-def _existing_file(output_dir: Path, source_title: str, artifact_type: str) -> Path | None:
-    """Return the first file matching ``*__<safe_src>__<type>.*`` in *output_dir*, or None."""
-    src = _safe_filename(source_title)
+def _expected_file(output_dir: Path, notebook_title: str, source_title: str, artifact_type: str, created_at: str) -> Path | None:
+    """Return the exact expected output file if it already exists, or None.
+
+    The filename is ``<yyyymmdd_hhmmss>_<Notebook>__<Source>__<type>.*`` where the
+    timestamp comes from the artifact's own ``createdAt``, so each artifact generation
+    produces a unique name and an older file for the same source never causes a skip.
+    """
+    if not created_at:
+        print(f"⚠ FALLBACK: _expected_file called with empty createdAt for '{source_title}' — SDK returned no createdAt; skip check disabled, file will always be re-downloaded")
+        return None
+    ts_str = _parse_created_at(created_at)
+    nb   = _safe_filename(notebook_title)
+    src  = _safe_filename(source_title)
     atype = artifact_type.upper()
-    matches = list(output_dir.glob(f"*__{src}__{atype}.*"))
+    matches = list(output_dir.glob(f"{ts_str}_{nb}__{src}__{atype}.*"))
     return matches[0] if matches else None
 
 
@@ -77,12 +89,16 @@ def _final_name(file_path: str, notebook_title: str, source_title: str, artifact
     if created_at:
         ts_str = _parse_created_at(created_at)
     else:
+        print(f"⚠ FALLBACK: _final_name has no createdAt for '{source_title}' — falling back to filename timestamp")
         m = re.match(r'^.+_(\d{13})$', p.stem)
-        ts_str = (
-            datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
-            .astimezone().strftime("%Y%m%d_%H%M%S")
-            if m else _ts_now()
-        )
+        if m:
+            ts_str = (
+                datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
+                .astimezone().strftime("%Y%m%d_%H%M%S")
+            )
+        else:
+            ts_str = _ts_now()
+            print(f"⚠ FALLBACK: _final_name could not extract timestamp from filename {p.name!r} — using current time {ts_str}")
     nb  = _safe_filename(notebook_title)
     src = _safe_filename(source_title)
     atype = artifact_type.upper()
@@ -125,7 +141,7 @@ const SOURCES       = {json.dumps(sources)};
 const CUSTOMIZATION = {json.dumps(customization)};
 const INSTRUCTIONS  = {json.dumps(instructions or '')};
 
-const jobs: Array<{{ sourceId: string; sourceTitle: string; artifactId: string }}> = [];
+const jobs: Array<{{ sourceId: string; sourceTitle: string; artifactId: string; notebookTitle: string; createdAt: string }}> = [];
 const errors: Array<{{ title: string; error: string }}> = [];
 
 for (const source of SOURCES) {{
@@ -136,7 +152,7 @@ for (const source of SOURCES) {{
       ...(INSTRUCTIONS ? {{ instructions: INSTRUCTIONS }} : {{}}),
       customization: CUSTOMIZATION,
     }});
-    jobs.push({{ sourceId: source.sourceId, sourceTitle: source.title, artifactId: artifact.artifactId }});
+    jobs.push({{ sourceId: source.sourceId, sourceTitle: source.title, artifactId: artifact.artifactId, notebookTitle, createdAt: artifact.createdAt ?? '' }});
   }} catch (err: any) {{
     errors.push({{ title: source.title, error: err.message }});
   }}
@@ -294,11 +310,52 @@ def download_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_str = str(output_dir).replace("\\", "/")
 
-    # Pre-check: skip jobs whose output file already exists
+    # Backfill notebookTitle / createdAt for jobs created before those fields were stored.
+    # Fetch from the SDK in a single TS call rather than silently degrading.
+    stale = [j for j in jobs if not j.get("notebookTitle") or not j.get("createdAt")]
+    if stale:
+        print(f"ℹ {len(stale)} job(s) missing notebookTitle/createdAt — fetching from SDK to backfill…")
+        stale_json = json.dumps([{"artifactId": j["artifactId"]} for j in stale])
+        backfill_script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+
+{_ts_client(creds)}
+
+const notebook = await sdk.notebooks.get('{notebook_id}');
+const notebookTitle = notebook.title ?? '{notebook_id}';
+
+const enriched: Array<{{ artifactId: string; notebookTitle: string; createdAt: string }}> = [];
+for (const job of {stale_json}) {{
+  const art = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
+  enriched.push({{ artifactId: job.artifactId, notebookTitle, createdAt: art.createdAt ?? '' }});
+}}
+console.log('__ENRICHED__' + JSON.stringify(enriched) + '__ENRICHED__');
+await sdk.dispose();
+"""
+        raw_e = run_ts("_tmp_download_artifacts", backfill_script)
+        enriched = json.loads(raw_e[raw_e.find("__ENRICHED__") + 12 : raw_e.rfind("__ENRICHED__")])
+        by_id = {e["artifactId"]: e for e in enriched}
+        for j in jobs:
+            if j["artifactId"] in by_id:
+                e = by_id[j["artifactId"]]
+                if not j.get("notebookTitle"):
+                    j["notebookTitle"] = e["notebookTitle"]
+                if not j.get("createdAt"):
+                    if e["createdAt"]:
+                        j["createdAt"] = e["createdAt"]
+                    else:
+                        print(f"⚠ FALLBACK: SDK returned empty createdAt for '{j['sourceTitle']}' (artifactId={j['artifactId']}) — skip check disabled for this job")
+        # Persist enriched fields back to the jobs file so future runs don't need to re-fetch
+        if hasattr(jobs, "path") and jobs.path.exists():
+            jobs.path.write_text(json.dumps(list(jobs), indent=2), encoding="utf-8")
+            print(f"  ✓ Jobs file updated: {jobs.path.name}")
+
+    # Skip jobs whose exact output file (keyed on the artifact's own createdAt timestamp)
+    # already exists locally.
     skipped     = []
     to_download = []
     for j in jobs:
-        existing = _existing_file(output_dir, j["sourceTitle"], artifact_type)
+        existing = _expected_file(output_dir, j.get("notebookTitle", ""), j["sourceTitle"], artifact_type, j.get("createdAt", ""))
         if existing:
             skipped.append({"sourceTitle": j["sourceTitle"], "filePath": str(existing), "status": "skipped"})
         else:
@@ -323,14 +380,14 @@ def download_artifacts(
     if artifact_type in _DOWNLOAD_VIA_GET:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.get(job.artifactId, '{notebook_id}', {{ outputPath: '{output_str}' }});
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: (res as any).downloadPath as string }});
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: (res as any).downloadPath as string }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
     else:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.download(job.artifactId, '{output_str}', '{notebook_id}');
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: res.filePath }});
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: res.filePath }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
