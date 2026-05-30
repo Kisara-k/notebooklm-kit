@@ -88,7 +88,7 @@ def load_credentials(
 
     if mode == "auto":
         if creds_file.exists():
-            print("ℹ credentials: using patchright (credentials.json found)")
+            print("credentials: using patchright (credentials.json found)")
             return load_credentials("patchright")
         if has_cookies:
             print("ℹ credentials: credentials.json not found — falling back to .env cookies")

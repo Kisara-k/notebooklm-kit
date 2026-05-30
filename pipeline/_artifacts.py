@@ -332,7 +332,6 @@ def download_artifacts(
     # Fetch from the SDK in a single TS call rather than silently degrading.
     stale = [j for j in jobs if not j.get("notebookTitle") or not j.get("createdAt")]
     if stale:
-        print(f"ℹ {len(stale)} job(s) missing notebookTitle/createdAt — fetching from SDK to backfill…")
         stale_json = json.dumps([{"artifactId": j["artifactId"]} for j in stale])
         backfill_script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
@@ -366,7 +365,6 @@ await sdk.dispose();
         # Persist enriched fields back to the jobs file so future runs don't need to re-fetch
         if hasattr(jobs, "path") and jobs.path.exists():
             jobs.path.write_text(json.dumps(list(jobs), indent=2), encoding="utf-8")
-            print(f"  ✓ Jobs file updated: {jobs.path.name}")
 
     # Skip jobs whose exact output file (keyed on the artifact's own createdAt timestamp)
     # already exists locally.
