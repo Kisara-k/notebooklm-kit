@@ -65,6 +65,7 @@ coverage/
 # Temp files
 *.tmp
 *.temp
+_tmp*.ts
 .cache/
 .turbo/
 
@@ -86,3 +87,20 @@ scripts/
 
 # Git hooks (personal tooling)
 .git/hooks/prepare-commit-msg.mjs
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local Files
+downloads/
+jobs/
+outputs/
