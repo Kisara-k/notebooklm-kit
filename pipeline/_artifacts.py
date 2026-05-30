@@ -8,10 +8,12 @@ Each function is designed to be called identically regardless of artifact type.
 Download behaviour is specialised per type where the SDK requires it.
 """
 
+import asyncio
 import json
 import re
 import subprocess
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from ._core import SDK_ROOT, run_ts, _ts_client
 _DOWNLOAD_VIA_DOWNLOAD = {"FLASHCARDS", "QUIZ", "AUDIO", "INFOGRAPHIC"}
 
 # These types use sdk.artifacts.get(id, notebookId, { outputPath }) → { downloadPath }
+# Note: sdk.artifacts.download() explicitly throws for VIDEO and SLIDE_DECK
 _DOWNLOAD_VIA_GET = {"VIDEO", "SLIDE_DECK"}
 
 
@@ -36,6 +39,73 @@ def _jobs_dir(artifact_type: str) -> Path:
 
 def _ts_now() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+_USER_DATA_DIR = str(Path(__file__).parent / "notebooklm_profile")
+
+
+async def _resolve_and_download_video(video_url: str, dest_path: Path) -> None:
+    """Use patchright persistent context to follow the lh3.google.com redirect chain,
+    intercept the googlevideo.com/videoplayback URL, then stream-download it."""
+    from patchright.async_api import async_playwright
+
+    # The persistent profile already has the Google session — no cookie injection needed
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            _USER_DATA_DIR,
+            headless=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            args=["--no-first-run", "--no-default-browser-check"],
+        )
+        try:
+            resolved: list[str] = []
+            page = await context.new_page()
+
+            # Intercept googlevideo.com requests — capture URL then abort
+            async def handle_route(route):
+                url = route.request.url
+                if "googlevideo.com" in url and not resolved:
+                    resolved.append(url)
+                await route.abort()
+
+            await page.route("**/*googlevideo.com/**", handle_route)
+
+            try:
+                await page.goto(video_url, wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(4_000)  # wait for any in-flight redirects
+            except Exception:
+                pass  # navigation throws when we abort the video request — expected
+
+            if not resolved:
+                final = page.url
+                if "accounts.google.com" in final or "ServiceLogin" in final:
+                    raise RuntimeError(
+                        "Google redirected to sign-in — re-run login.py to refresh the browser session."
+                    )
+                raise RuntimeError(f"Could not capture googlevideo.com URL. Final page: {final}")
+
+            cdn_url = resolved[0]
+        finally:
+            await context.close()
+
+    # Stream-download the CDN URL with urllib (no auth needed once we have the signed URL)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(
+        cdn_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "Range": "bytes=0-",
+            "Referer": "https://notebooklm.google.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=300) as resp, dest_path.open("wb") as f:
+        while chunk := resp.read(1 << 20):  # 1 MB chunks
+            f.write(chunk)
+
+
+def _download_video(video_url: str, dest_path: Path) -> None:
+    """Sync wrapper around `_resolve_and_download_video`."""
+    asyncio.run(_resolve_and_download_video(video_url, dest_path))
 
 
 class JobList(list):
@@ -320,10 +390,97 @@ def download_artifacts(
         print(sep)
         return results
 
-    if artifact_type in _DOWNLOAD_VIA_GET:
+    # VIDEO: handled entirely in Python using patchright persistent context.
+    # The persistent browser profile (pipeline/notebooklm_profile/) already has
+    # the Google session, so no cookie injection needed. We intercept the
+    # googlevideo.com request to get the signed CDN URL, then stream-download.
+    if artifact_type == "VIDEO":
+        # Step 1: get artifact metadata (videoData URL + notebookTitle) via TS
+        meta_script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+import {{ ArtifactState }} from './src/types/artifact.js';
+
+{_ts_client(creds)}
+
+const notebook = await sdk.notebooks.get('{notebook_id}');
+const notebookTitle = notebook.title ?? '{notebook_id}';
+const meta: Array<{{ sourceTitle: string; notebookTitle: string; createdAt: string; videoData: string }}> = [];
+const errors: Array<{{ sourceTitle: string; error: string }}> = [];
+
+for (const job of {json.dumps(to_download)}) {{
+  const artifact = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
+  if (artifact.state !== ArtifactState.READY) {{
+    errors.push({{ sourceTitle: job.sourceTitle, error: `not ready: state=${{artifact.state}}` }});
+    continue;
+  }}
+  const videoData: string = (artifact as any).videoData ?? '';
+  if (!videoData) {{
+    errors.push({{ sourceTitle: job.sourceTitle, error: 'artifact.videoData missing' }});
+    continue;
+  }}
+  meta.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', videoData }});
+}}
+console.log('__META__' + JSON.stringify({{ meta, errors }}) + '__META__');
+await sdk.dispose();
+"""
+        raw  = run_ts("_tmp_video_meta", meta_script)
+        data = json.loads(raw[raw.find("__META__") + 8 : raw.rfind("__META__")])
+        ts_errors = data.get("errors", [])
+        fresh: list[dict] = []
+        errors_list: list[dict] = list(ts_errors)
+
+        # Step 2: for each video, use patchright to resolve URL then stream-download
+        for m in data["meta"]:
+            safe_title = re.sub(r'[^\w\s\-.]', '', m["notebookTitle"] or notebook_id).strip().replace(" ", "_")
+            safe_src   = _safe_filename(m["sourceTitle"])
+            dest_path  = output_dir / f"{safe_title}__{safe_src}.mp4"
+            try:
+                print(f"  Resolving video URL for: {m['sourceTitle']} …")
+                _download_video(m["videoData"], dest_path)
+                final_path = _final_name(str(dest_path), m["notebookTitle"], m["sourceTitle"], artifact_type, m.get("createdAt") or None)
+                fresh.append({"sourceTitle": m["sourceTitle"], "filePath": final_path, "status": "downloaded"})
+            except Exception as exc:
+                errors_list.append({"sourceTitle": m["sourceTitle"], "error": str(exc)})
+
+        # Merge results + skipped, print table, return
+        by_title = {r["sourceTitle"]: r for r in fresh}
+        results  = []
+        for j in jobs:
+            if j["sourceTitle"] in by_title:
+                results.append(by_title[j["sourceTitle"]])
+            else:
+                sk = next((s for s in skipped if s["sourceTitle"] == j["sourceTitle"]), None)
+                if sk:
+                    results.append(sk)
+
+        col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
+        sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
+        n_dl   = sum(1 for r in results if r.get("status") == "downloaded")
+        n_skip = sum(1 for r in results if r.get("status") == "skipped")
+        print(f"\nDownloaded {n_dl} / {len(jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
+        print(sep)
+        print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
+        print(sep)
+        for i, r in enumerate(results):
+            fname = Path(r["filePath"]).name
+            trunc = fname if len(fname) <= 44 else fname[:41] + "..."
+            print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {r.get('status','?'):10} |")
+        if errors_list:
+            print(sep)
+            for e in errors_list:
+                print(f"  x  {e['sourceTitle']}: {e['error']}")
+        print(sep)
+        return results
+
+    elif artifact_type in _DOWNLOAD_VIA_GET:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.get(job.artifactId, '{notebook_id}', {{ outputPath: '{output_str}' }});
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: (res as any).downloadPath as string }});
+    const dlPath: string | undefined = (res as any).downloadPath;
+    if (!dlPath) {{
+      errors.push({{ sourceTitle: job.sourceTitle, error: 'SDK returned no download path — Playwright download likely failed' }});
+    }} else {{
+      results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: dlPath }});
+    }}
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""

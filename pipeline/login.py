@@ -37,9 +37,16 @@ async def login():
         print("On NotebookLM — waiting for page to settle...")
         await page.wait_for_load_state("networkidle", timeout=20000)
 
-        raw_cookies = await context.cookies("https://notebooklm.google.com")
-        cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in raw_cookies)
-        print(f"Cookies saved ({len(raw_cookies)} entries, {len(cookie_str)} chars)")
+        raw_nb  = await context.cookies("https://notebooklm.google.com")
+        raw_lh3 = await context.cookies("https://lh3.google.com")
+        # Merge: lh3 first so notebooklm values win on any conflict
+        cookie_map = {}
+        for c in raw_lh3:
+            cookie_map[c['name']] = c['value']
+        for c in raw_nb:
+            cookie_map[c['name']] = c['value']
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookie_map.items())
+        print(f"Cookies saved ({len(cookie_map)} unique entries, {len(cookie_str)} chars)")
 
         credentials = {"authToken": "", "cookies": cookie_str}
         CREDENTIALS_JSON.write_text(json.dumps(credentials, indent=2), encoding="utf-8")
