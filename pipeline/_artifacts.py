@@ -38,15 +38,55 @@ def _ts_now() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _rename_downloaded(file_path: str) -> str:
-    """Rename `name_<13-digit-ms>.ext` → `<yyyymmdd_hhmmss>_name.ext` in place."""
+class JobList(list):
+    """list[dict] that also carries the path of the originating jobs file."""
+    def __new__(cls, items, path):
+        return super().__new__(cls, items)
+    def __init__(self, items, path: Path):
+        super().__init__(items)
+        self.path = path
+
+
+def _safe_filename(s: str, maxlen: int = 30) -> str:
+    """Strip non-filename characters and collapse whitespace."""
+    s = re.sub(r'[^\w\s\-.]', '', s)
+    s = re.sub(r'\s+', '_', s.strip())
+    return s[:maxlen]
+
+
+def _parse_created_at(created_at: str) -> str:
+    """Convert an ISO-8601 ``createdAt`` string to ``yyyymmdd_hhmmss`` local time."""
+    try:
+        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        return dt.astimezone().strftime("%Y%m%d_%H%M%S")
+    except Exception:
+        return _ts_now()
+
+
+def _existing_file(output_dir: Path, source_title: str, artifact_type: str) -> Path | None:
+    """Return the first file matching ``*__<safe_src>__<type>.*`` in *output_dir*, or None."""
+    src = _safe_filename(source_title)
+    atype = artifact_type.upper()
+    matches = list(output_dir.glob(f"*__{src}__{atype}.*"))
+    return matches[0] if matches else None
+
+
+def _final_name(file_path: str, notebook_title: str, source_title: str, artifact_type: str, created_at: str | None = None) -> str:
+    """Rename downloaded file to ``<yyyymmdd_hhmmss>_<Notebook>__<Source>__<type><ext>``."""
     p = Path(file_path)
-    m = re.match(r"^(.+)_(\d{13})$", p.stem)
-    if not m:
-        return file_path
-    name_part, ts_ms = m.group(1), int(m.group(2))
-    ts_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
-    new_path = p.parent / f"{ts_str}_{name_part}{p.suffix}"
+    if created_at:
+        ts_str = _parse_created_at(created_at)
+    else:
+        m = re.match(r'^.+_(\d{13})$', p.stem)
+        ts_str = (
+            datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
+            .astimezone().strftime("%Y%m%d_%H%M%S")
+            if m else _ts_now()
+        )
+    nb  = _safe_filename(notebook_title)
+    src = _safe_filename(source_title)
+    atype = artifact_type.upper()
+    new_path = p.parent / f"{ts_str}_{nb}__{src}__{atype}{p.suffix}"
     p.rename(new_path)
     return str(new_path)
 
@@ -68,6 +108,8 @@ def create_artifacts(
     Job IDs are automatically saved to ``jobs/<type>/<yyyymmdd_hhmmss>_jobs.json``.
     Use :func:`load_jobs` to reload them in a later session.
     """
+    if isinstance(sources, dict):
+        sources = [sources]
     artifact_type = artifact_type.upper()
     label = artifact_type.replace("_", " ").title()
     script = f"""
@@ -76,14 +118,17 @@ import {{ ArtifactType }} from './src/types/artifact.js';
 
 {_ts_client(creds)}
 
+const notebook = await sdk.notebooks.get('{notebook_id}');
+const notebookTitle = notebook.title ?? '{notebook_id}';
+
 const SOURCES       = {json.dumps(sources)};
 const CUSTOMIZATION = {json.dumps(customization)};
 const INSTRUCTIONS  = {json.dumps(instructions or '')};
 
 const jobs: Array<{{ sourceId: string; sourceTitle: string; artifactId: string }}> = [];
+const errors: Array<{{ title: string; error: string }}> = [];
 
 for (const source of SOURCES) {{
-  console.log(`Creating {label} for: ${{source.title}}`);
   try {{
     const artifact = await sdk.artifacts.create('{notebook_id}', ArtifactType.{artifact_type}, {{
       title: `{label} \u2014 ${{source.title}}`,
@@ -91,26 +136,38 @@ for (const source of SOURCES) {{
       ...(INSTRUCTIONS ? {{ instructions: INSTRUCTIONS }} : {{}}),
       customization: CUSTOMIZATION,
     }});
-    console.log(`  \u2713 ${{artifact.artifactId}}  state: ${{artifact.state}}`);
     jobs.push({{ sourceId: source.sourceId, sourceTitle: source.title, artifactId: artifact.artifactId }});
   }} catch (err: any) {{
-    console.error(`  \u2717 ${{source.title}}: ${{err.message}}`);
+    errors.push({{ title: source.title, error: err.message }});
   }}
 }}
 
-console.log('__JOBS__' + JSON.stringify(jobs) + '__JOBS__');
+console.log('__JOBS__' + JSON.stringify({{ notebookTitle, jobs, errors }}) + '__JOBS__');
 await sdk.dispose();
 """
-    raw = run_ts("_tmp_create_artifacts", script)
-    print(raw)
-    jobs = json.loads(raw[raw.find("__JOBS__") + 8 : raw.rfind("__JOBS__")])
+    raw  = run_ts("_tmp_create_artifacts", script)
+    data = json.loads(raw[raw.find("__JOBS__") + 8 : raw.rfind("__JOBS__")])
+    jobs          = data["jobs"]
+    errors        = data.get("errors", [])
+    notebook_name = _safe_filename(data.get("notebookTitle", notebook_id))
 
-    jobs_path = _jobs_dir(artifact_type) / f"{_ts_now()}_jobs.json"
+    jobs_path = _jobs_dir(artifact_type) / f"{_ts_now()}_{notebook_name}.json"
     jobs_path.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
-    print(f"\n✓ Submitted {len(jobs)} job(s)  →  {jobs_path}")
-    for j in jobs:
-        print(f"  {j['sourceTitle']}  →  {j['artifactId']}")
-    return jobs
+
+    col = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
+    sep = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
+    print(f"\nSubmitted {len(jobs)} job(s)  \u2192  {jobs_path.relative_to(SDK_ROOT)}")
+    print(sep)
+    print(f"| {'#':1} | {'Source':{col}} | {'Artifact ID':44} |")
+    print(sep)
+    for i, j in enumerate(jobs):
+        print(f"| {i:1} | {j['sourceTitle']:{col}} | {j['artifactId']:44} |")
+    if errors:
+        print(sep)
+        for e in errors:
+            print(f"  x  {e['title']}: {e['error']}")
+    print(sep)
+    return JobList(jobs, jobs_path)
 
 
 def load_jobs(artifact_type: str, filename: str | None = None) -> list[dict]:
@@ -128,15 +185,21 @@ def load_jobs(artifact_type: str, filename: str | None = None) -> list[dict]:
         if not p.exists():
             raise FileNotFoundError(f"Jobs file not found: {p}")
     else:
-        candidates = sorted(d.glob("*_jobs.json"))
+        candidates = sorted(d.glob("*.json"))
         if not candidates:
             raise FileNotFoundError(f"No jobs files found in {d}. Run create_artifacts first.")
         p = candidates[-1]
     jobs = json.loads(p.read_text(encoding="utf-8"))
-    print(f"Loaded {len(jobs)} job(s) from {p.name}:")
-    for j in jobs:
-        print(f"  {j['sourceTitle']}  →  {j['artifactId']}")
-    return jobs
+    col  = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
+    sep  = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
+    print(f"\nLoaded {len(jobs)} job(s) from {p.name}")
+    print(sep)
+    print(f"| {'#':1} | {'Source':{col}} | {'Artifact ID':44} |")
+    print(sep)
+    for i, j in enumerate(jobs):
+        print(f"| {i:1} | {j['sourceTitle']:{col}} | {j['artifactId']:44} |")
+    print(sep)
+    return JobList(jobs, p)
 
 
 def poll_jobs(
@@ -231,57 +294,104 @@ def download_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_str = str(output_dir).replace("\\", "/")
 
+    # Pre-check: skip jobs whose output file already exists
+    skipped     = []
+    to_download = []
+    for j in jobs:
+        existing = _existing_file(output_dir, j["sourceTitle"], artifact_type)
+        if existing:
+            skipped.append({"sourceTitle": j["sourceTitle"], "filePath": str(existing), "status": "skipped"})
+        else:
+            to_download.append(j)
+
+    if not to_download:
+        # Nothing to download — build table from skipped only and return early
+        results = skipped
+        col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
+        sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
+        print(f"\nDownloaded 0 / {len(jobs)} artifact(s)  ({len(skipped)} skipped)  \u2192  {output_dir}")
+        print(sep)
+        print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
+        print(sep)
+        for i, r in enumerate(results):
+            fname = Path(r["filePath"]).name
+            trunc = fname if len(fname) <= 44 else fname[:41] + "..."
+            print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {r['status']:10} |")
+        print(sep)
+        return results
+
     if artifact_type in _DOWNLOAD_VIA_GET:
-        extra_imports = "import * as path from 'path';\nimport * as fs from 'fs/promises';"
         dl_body = f"""  try {{
     const res = await sdk.artifacts.get(job.artifactId, '{notebook_id}', {{ outputPath: '{output_str}' }});
-    const tmpPath = (res as any).downloadPath as string;
-    const safeName = job.sourceTitle.replace(/[^\\w\\s\\-]/g, '').replace(/\\s+/g, '_').substring(0, 100);
-    const finalPath = path.join('{output_str}', safeName + '.mp4');
-    if (tmpPath !== finalPath) {{ await fs.rename(tmpPath, finalPath); }}
-    console.log(`  \u2713 ${{finalPath}}`);
-    results.push({{ sourceTitle: job.sourceTitle, filePath: finalPath }});
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: (res as any).downloadPath as string }});
   }} catch (err: any) {{
-    console.error(`  \u2717 ${{err.message}}`);
+    errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
     else:
-        extra_imports = ""
         dl_body = f"""  try {{
     const res = await sdk.artifacts.download(job.artifactId, '{output_str}', '{notebook_id}');
-    console.log(`  \u2713 ${{res.filePath}}`);
-    results.push({{ sourceTitle: job.sourceTitle, filePath: res.filePath }});
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: artifact.createdAt ?? '', filePath: res.filePath }});
   }} catch (err: any) {{
-    console.error(`  \u2717 ${{err.message}}`);
+    errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
 
-    script = f"""{extra_imports}
+    script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
 import {{ ArtifactState }} from './src/types/artifact.js';
 
 {_ts_client(creds)}
 
-const results: Array<{{ sourceTitle: string; filePath: string }}> = [];
+const notebook = await sdk.notebooks.get('{notebook_id}');
+const notebookTitle = notebook.title ?? '{notebook_id}';
 
-for (const job of {json.dumps(jobs)}) {{
-  console.log(`Downloading: ${{job.sourceTitle}}`);
+const results: Array<{{ sourceTitle: string; notebookTitle: string; createdAt: string; filePath: string }}> = [];
+const errors:  Array<{{ sourceTitle: string; error: string }}> = [];
+
+for (const job of {json.dumps(to_download)}) {{
   const artifact = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
   if (artifact.state !== ArtifactState.READY) {{
-    console.log(`  \u26a0 Skipping \u2014 state: ${{artifact.state}}`);
+    errors.push({{ sourceTitle: job.sourceTitle, error: `not ready: state=${{artifact.state}}` }});
     continue;
   }}
 {dl_body}
 }}
 
-console.log('__RESULTS__' + JSON.stringify(results) + '__RESULTS__');
+console.log('__RESULTS__' + JSON.stringify({{ results, errors }}) + '__RESULTS__');
 await sdk.dispose();
 """
-    raw = run_ts("_tmp_download_artifacts", script)
-    print(raw)
-    results = json.loads(raw[raw.find("__RESULTS__") + 11 : raw.rfind("__RESULTS__")])
-    if artifact_type in _DOWNLOAD_VIA_DOWNLOAD:
-        for r in results:
-            r["filePath"] = _rename_downloaded(r["filePath"])
-    print(f"\n✅ Downloaded {len(results)} / {len(jobs)} artifact(s)  →  {output_dir}")
-    for r in results:
-        print(f"  {r['filePath']}")
+    raw  = run_ts("_tmp_download_artifacts", script)
+    data = json.loads(raw[raw.find("__RESULTS__") + 11 : raw.rfind("__RESULTS__")])
+    fresh  = data["results"]
+    errors = data.get("errors", [])
+    for r in fresh:
+        r["filePath"] = _final_name(r["filePath"], r["notebookTitle"], r["sourceTitle"], artifact_type, r.get("createdAt") or None)
+        r["status"] = "downloaded"
+
+    # Merge: preserve job order, insert skipped entries
+    by_title = {r["sourceTitle"]: r for r in fresh}
+    results  = []
+    for j in jobs:
+        if j["sourceTitle"] in by_title:
+            results.append(by_title[j["sourceTitle"]])
+        elif j["sourceTitle"] in {s["sourceTitle"]: s for s in skipped}:
+            results.append(next(s for s in skipped if s["sourceTitle"] == j["sourceTitle"]))
+
+    col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
+    sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
+    n_dl   = sum(1 for r in results if r.get("status") == "downloaded")
+    n_skip = sum(1 for r in results if r.get("status") == "skipped")
+    print(f"\nDownloaded {n_dl} / {len(jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
+    print(sep)
+    print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
+    print(sep)
+    for i, r in enumerate(results):
+        fname = Path(r["filePath"]).name
+        trunc = fname if len(fname) <= 44 else fname[:41] + "..."
+        status = r.get("status", "?")
+        print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {status:10} |")
+    if errors:
+        print(sep)
+        for e in errors:
+            print(f"  x  {e['sourceTitle']}: {e['error']}")
+    print(sep)
     return results
