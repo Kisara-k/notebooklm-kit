@@ -16,20 +16,38 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ._core import SDK_ROOT, run_ts, _ts_client
+from .config import (
+    FILENAME_COMPONENT_MAXLEN,
+    FILENAME_TS_FORMAT,
+    RENAME_SOURCE_MAXLEN,
+    RENAME_TS_FORMAT,
+    POLL_INTERVAL_SEC,
+    POLL_MAX_WAIT_MIN,
+    JOBS_SUBDIR,
+    OUTPUTS_SUBDIR,
+    UUID_COL_WIDTH,
+)
 
 # ---------------------------------------------------------------------------
-# Internal: per-type download strategy
+# Internal constants (not intended for user tuning)
 # ---------------------------------------------------------------------------
 
-# These types use sdk.artifacts.download(id, folder, notebookId) → { filePath }
+# Per-type download strategy:
+# sdk.artifacts.download(id, folder, notebookId) → { filePath }
 _DOWNLOAD_VIA_DOWNLOAD = {"FLASHCARDS", "QUIZ", "AUDIO", "INFOGRAPHIC"}
-
-# These types use sdk.artifacts.get(id, notebookId, { outputPath }) → { downloadPath }
+# sdk.artifacts.get(id, notebookId, { outputPath }) → { downloadPath }
 _DOWNLOAD_VIA_GET = {"VIDEO", "SLIDE_DECK"}
+
+# ArtifactType enum values (TS src/types/artifact.ts) → display label
+_ARTIFACT_TYPE_LABELS = {
+    0: "UNKNOWN", 1: "REPORT", 5: "QUIZ", 6: "FLASHCARDS",
+    7: "MIND_MAP", 8: "INFOGRAPHIC", 9: "SLIDE_DECK",
+    10: "AUDIO", 11: "VIDEO",
+}
 
 
 def _jobs_dir(artifact_type: str) -> Path:
-    d = SDK_ROOT / "jobs" / artifact_type.lower()
+    d = SDK_ROOT / JOBS_SUBDIR / artifact_type.lower()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -47,7 +65,7 @@ class JobList(list):
         self.path = path
 
 
-def _safe_filename(s: str, maxlen: int = 30) -> str:
+def _safe_filename(s: str, maxlen: int = FILENAME_COMPONENT_MAXLEN) -> str:
     """Strip non-filename characters and collapse whitespace."""
     s = re.sub(r'[^\w\s\-.]', '', s)
     s = re.sub(r'\s+', '_', s.strip())
@@ -58,7 +76,7 @@ def _parse_created_at(created_at: str) -> str:
     """Convert an ISO-8601 ``createdAt`` string to ``yyyymmdd_hhmmss`` local time."""
     try:
         dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-        return dt.astimezone().strftime("%Y%m%d_%H%M%S")
+        return dt.astimezone().strftime(FILENAME_TS_FORMAT)
     except Exception as e:
         ts = _ts_now()
         print(f"⚠ FALLBACK: _parse_created_at could not parse {created_at!r} ({e}); using current time {ts}")
@@ -94,7 +112,7 @@ def _final_name(file_path: str, notebook_title: str, source_title: str, artifact
         if m:
             ts_str = (
                 datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
-                .astimezone().strftime("%Y%m%d_%H%M%S")
+                .astimezone().strftime(FILENAME_TS_FORMAT)
             )
         else:
             ts_str = _ts_now()
@@ -223,8 +241,8 @@ def poll_jobs(
     notebook_id: str,
     creds: dict,
     *,
-    interval: int = 30,
-    max_wait_min: int = 15,
+    interval: int = POLL_INTERVAL_SEC,
+    max_wait_min: int = POLL_MAX_WAIT_MIN,
 ) -> bool:
     """Poll artifact states until all are READY or FAILED.
 
@@ -306,7 +324,7 @@ def download_artifacts(
     """
     artifact_type = artifact_type.upper()
     if output_dir is None:
-        output_dir = SDK_ROOT / "outputs" / artifact_type.lower()
+        output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_str = str(output_dir).replace("\\", "/")
 
@@ -458,14 +476,6 @@ await sdk.dispose();
 # Inventory: list artifacts in a notebook
 # ---------------------------------------------------------------------------
 
-# ArtifactType enum (TS src/types/artifact.ts) → display label
-_ARTIFACT_TYPE_LABELS = {
-    0: "UNKNOWN", 1: "REPORT", 5: "QUIZ", 6: "FLASHCARDS",
-    7: "MIND_MAP", 8: "INFOGRAPHIC", 9: "SLIDE_DECK",
-    10: "AUDIO", 11: "VIDEO",
-}
-
-
 def list_artifacts(notebook_id: str, sources: list[dict], creds: dict) -> list[dict]:
     """Return all artifacts in *notebook_id* and print a table.
 
@@ -540,7 +550,7 @@ await sdk.dispose();
     col_y = max(col_y, 4)
     col_s = max((len(r["sources"]) for r in rows), default=7)
     col_s = max(col_s, 7)
-    UUID  = 36
+    UUID  = UUID_COL_WIDTH
 
     sep = f"+----+{'-' * (col_t + 2)}+{'-' * (col_y + 2)}+---------------------+{'-' * (col_s + 2)}+{'-' * (UUID + 2)}+"
     print(f"\nArtifacts in notebook {notebook_id} ({len(rows)} total)")
@@ -604,7 +614,7 @@ def rename_single_source_artifacts(
         except Exception as e:
             print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has unparseable createdAt {created!r} ({e}) — skipped")
             continue
-        new_title = f"{title_of[sid][:30]} {dt.strftime('%y%m%d %H%M')}"
+        new_title = f"{title_of[sid][:RENAME_SOURCE_MAXLEN]} {dt.strftime(RENAME_TS_FORMAT)}"
         if new_title in (a.get("title") or ""):
             continue  # already contains the canonical name (may have extra prefix/suffix)
         targets.append({

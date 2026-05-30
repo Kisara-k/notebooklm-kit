@@ -7,8 +7,12 @@ import urllib.request
 from pathlib import Path
 from typing import Literal
 
-# Root of the notebooklm-kit repository (parent of this pipeline/ package)
-SDK_ROOT: Path = Path(__file__).parent.parent
+from .config import (
+    SDK_ROOT,
+    CREDENTIALS_FILENAME,
+    AUTH_FETCH_TIMEOUT_SEC,
+    AUTH_USER_AGENT,
+)
 
 
 def _parse_dotenv(path: Path) -> dict:
@@ -35,13 +39,13 @@ def _fetch_auth_token(cookie_str: str) -> str:
     req = urllib.request.Request(
         "https://notebooklm.google.com/",
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "User-Agent": AUTH_USER_AGENT,
             "Cookie": cookie_str,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         },
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=AUTH_FETCH_TIMEOUT_SEC) as resp:
         html = resp.read().decode("utf-8", errors="replace")
     m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
     if m:
@@ -61,7 +65,7 @@ def load_credentials(
     * ``"cookies"``   — reads ``NOTEBOOKLM_AUTH_TOKEN`` + ``NOTEBOOKLM_COOKIES`` from ``.env``.
     * ``"auto"``      — tries patchright first, falls back to cookies.
     """
-    creds_file = SDK_ROOT / "credentials.json"
+    creds_file = SDK_ROOT / CREDENTIALS_FILENAME
 
     if mode == "patchright":
         if not creds_file.exists():

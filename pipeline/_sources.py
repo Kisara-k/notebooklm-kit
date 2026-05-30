@@ -2,6 +2,11 @@
 
 import json
 from ._core import run_ts, _ts_client
+from .config import UUID_COL_WIDTH
+
+# ---------------------------------------------------------------------------
+# Internal constants
+# ---------------------------------------------------------------------------
 
 _STATUS = {0: "UNKNOWN", 1: "PROCESSING", 2: "READY", 3: "FAILED"}
 
@@ -35,7 +40,7 @@ await sdk.dispose();
 
     col_t = max((len(s["title"]) for s in sources), default=5)
     col_t = max(col_t, 5)
-    UUID  = 36  # fixed width for a full UUID
+    UUID  = UUID_COL_WIDTH
     sep = f"+---+{'-' * (col_t + 2)}+------------+{'-' * (UUID + 2)}+"
     print(f"\nNotebook : {title}")
     print(sep)
