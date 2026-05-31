@@ -35,7 +35,10 @@ from .config import (
 
 # Per-type download strategy:
 # sdk.artifacts.download(id, folder, notebookId) → { filePath }
-_DOWNLOAD_VIA_DOWNLOAD = {"FLASHCARDS", "QUIZ", "AUDIO", "INFOGRAPHIC"}
+_DOWNLOAD_VIA_DOWNLOAD = {"FLASHCARDS", "QUIZ", "AUDIO"}
+# Bespoke: INFOGRAPHIC — sdk.artifacts.get() returns an imageUrl;
+# we fetch the PNG bytes ourselves with the auth cookies.
+_DOWNLOAD_VIA_INFOGRAPHIC = {"INFOGRAPHIC"}
 # sdk.artifacts.get(id, notebookId, { outputPath }) → { downloadPath }
 _DOWNLOAD_VIA_GET = {"VIDEO", "SLIDE_DECK"}
 
@@ -67,7 +70,11 @@ class JobList(list):
 
 
 def _safe_filename(s: str, maxlen: int | None = FILENAME_COMPONENT_MAXLEN) -> str:
-    """Strip non-filename characters; spaces are preserved. Pass ``maxlen=None`` to skip truncation."""
+    """Sanitise *s* for use as a filename component.
+
+    Strips trailing document extensions (.txt, .pdf, .docx, …) then removes
+    characters not valid in filenames. Pass ``maxlen=None`` to skip truncation."""
+    s = re.sub(r'\.(?:txt|pdf|docx?|xlsx?|pptx?|md|html?|csv|json|xml|rtf|odt)$', '', s, flags=re.IGNORECASE)
     s = re.sub(r'[^\w\s\-.]', '', s)
     return s.strip() if maxlen is None else s.strip()[:maxlen]
 
@@ -444,6 +451,28 @@ await sdk.dispose();
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
+    elif artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
+        # NotebookLM serves infographic PNGs from lh3.googleusercontent.com, which
+        # rejects plain HTTP requests with 403 even with valid SAPISIDHASH headers.
+        # Slide downloads in the SDK work around this with Playwright; we do the
+        # same here — launch a headless chromium with the auth cookies and let
+        # page.goto() download the image like a real browser would.
+        for j in to_download:
+            j["safeStem"] = _safe_filename(j["sourceTitle"])
+        dl_body = f"""  try {{
+    const meta: any = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
+    if (!meta.imageUrl) {{
+      errors.push({{ sourceTitle: job.sourceTitle, error: 'no imageUrl on infographic artifact' }});
+      continue;
+    }}
+    const safeStem: string = (job as any).safeStem || job.artifactId;
+    const fp = path.join('{output_str}', `${{safeStem}}__${{Date.now()}}.png`);
+    await fs.mkdir('{output_str}', {{ recursive: true }});
+    const bytes = await fetchInfographicImageWithPlaywright(meta.imageUrl, fp);
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: fp }});
+  }} catch (err: any) {{
+    errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
+  }}"""
     else:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.download(job.artifactId, '{output_str}', '{notebook_id}');
@@ -452,11 +481,57 @@ await sdk.dispose();
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
 
+    if artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
+        # Infographic images live on lh3.googleusercontent.com / lh3.google.com,
+        # which won't accept the raw notebooklm session cookies over HTTP. The
+        # only working approach is to navigate Chromium with the *persistent*
+        # patchright profile (the same one used to log in) and capture the
+        # browser-triggered download. The image URL responds with an
+        # attachment Content-Disposition, so Playwright fires the download event.
+        profile_path = str((SDK_ROOT / "pipeline" / "notebooklm_profile").resolve()).replace("\\", "/")
+        infographic_helpers = (
+            "import * as fs from 'fs/promises';\n"
+            "import * as path from 'path';\n"
+            "import { chromium, BrowserContext, Page } from 'playwright';\n"
+            "let __pwCtx: BrowserContext | null = null;\n"
+            "let __pwPage: Page | null = null;\n"
+            "async function __pwGetPage(): Promise<Page> {\n"
+            "  if (__pwPage) return __pwPage;\n"
+            "  __pwCtx = await chromium.launchPersistentContext(" + json.dumps(profile_path) + ", { headless: true, acceptDownloads: true });\n"
+            "  __pwPage = await __pwCtx.newPage();\n"
+            "  await __pwPage.goto('https://notebooklm.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });\n"
+            "  return __pwPage;\n"
+            "}\n"
+            "async function fetchInfographicImageWithPlaywright(url: string, savePath: string): Promise<number> {\n"
+            "  const page = await __pwGetPage();\n"
+            "  const [download] = await Promise.all([\n"
+            "    page.waitForEvent('download', { timeout: 60000 }),\n"
+            "    page.goto(url).catch(() => {}),\n"
+            "  ]);\n"
+            "  await download.saveAs(savePath);\n"
+            "  const buf = await fs.readFile(savePath);\n"
+            "  const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;\n"
+            "  if (!isPng) {\n"
+            "    await fs.unlink(savePath).catch(() => {});\n"
+            "    throw new Error(`downloaded file is not a PNG (size=${buf.length}, head=${buf.slice(0,8).toString('hex')})`);\n"
+            "  }\n"
+            "  return buf.length;\n"
+            "}\n"
+            "async function __pwClose(): Promise<void> {\n"
+            "  if (__pwCtx) { await __pwCtx.close(); __pwCtx = null; __pwPage = null; }\n"
+            "}\n"
+        )
+        infographic_rpc = ""
+    else:
+        infographic_helpers = ""
+        infographic_rpc = ""
+
     script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
 import {{ ArtifactState }} from './src/types/artifact.js';
-
+{infographic_helpers}
 {_ts_client(creds)}
+{infographic_rpc}
 
 const notebook = await sdk.notebooks.get('{notebook_id}');
 const notebookTitle = notebook.title ?? '{notebook_id}';
@@ -474,6 +549,7 @@ for (const job of {json.dumps(to_download)}) {{
 }}
 
 console.log('__RESULTS__' + JSON.stringify({{ results, errors }}) + '__RESULTS__');
+if (typeof __pwClose === 'function') {{ await __pwClose(); }}
 await sdk.dispose();
 """
     raw  = run_ts("_tmp_download_artifacts", script)

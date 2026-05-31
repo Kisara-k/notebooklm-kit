@@ -117,8 +117,8 @@ export interface SlideDeckCustomization {
   /** Language code (use NotebookLMLanguage enum or ISO 639-1 code, e.g., 'en') */
   language?: string;
   
-  /** Length: 1=Short (5-10 slides), 2=Default (10-15 slides) (default: 2) */
-  length?: 1 | 2;
+  /** Length: 2=Short (5-10 slides), 3=Default (10-15 slides) (default: 3) */
+  length?: 2 | 3;
 }
 
 /**
@@ -153,30 +153,29 @@ export interface AudioCustomization {
  * Video customization options
  */
 export interface VideoCustomization {
-  /** Format: 1=Explainer, 2=Brief (default: 1) */
-  format?: 1 | 2;
+  /** Format: 1=Explainer, 2=Brief, 3=Cinematic (default: 1) */
+  format?: 1 | 2 | 3;
   
   /** Language code (use NotebookLMLanguage enum or ISO 639-1 code, e.g., 'en') */
   language?: string;
   
   /** 
-   * Visual style options:
-   * - 0 = Auto-select (default) - AI chooses the best style
-   * - 1 = Custom - Requires customStyleDescription
+   * Visual style options (1-based):
+   * - 1 = Auto-select (default) - AI chooses the best style
+   * - ? = Custom - Requires customStyleDescription
    * - 2 = Classic - Traditional, professional style
    * - 3 = Whiteboard - Hand-drawn whiteboard style
-   * - 4 = Kawaii - Cute, colorful style
-   * - 5 = Anime - Anime-inspired style
-   * - 6 = Watercolour - Watercolor painting style
-   * - 7 = Anime (alternative) - Alternative anime style
-   * - 8 = Retro print - Vintage print/poster style
-   * - 9 = Heritage - Traditional ink-wash/woodcut style
-   * - 10 = Paper-craft - Layered paper cutout style
+   * - 9 = Kawaii - Cute, colorful style
+   * - ? = Anime - Anime-inspired style
+   * - ? = Watercolor - Watercolor painting style
+   * - ? = Retro print - Vintage print/poster style
+   * - 4 = Heritage - Traditional ink-wash/woodcut style
+   * - ? = Paper-craft - Layered paper cutout style
    * 
-   * Note: All styles except Custom (1) support only the `focus` option.
-   * Custom (1) additionally requires `customStyleDescription`.
+   * Note: All styles except Custom (2) support only the `focus` option.
+   * Custom (2) additionally requires `customStyleDescription`.
    */
-  visualStyle?: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+  visualStyle?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
   
   /** 
    * What should the AI hosts focus on? (optional)
@@ -185,8 +184,8 @@ export interface VideoCustomization {
   focus?: string;
   
   /** 
-   * Custom visual style description (required when visualStyle=1/Custom)
-   * Only used when visualStyle=1
+   * Custom visual style description (required when visualStyle=2/Custom)
+   * Only used when visualStyle=2
    */
   customStyleDescription?: string;
 }

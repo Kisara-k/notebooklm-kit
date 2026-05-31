@@ -1441,7 +1441,15 @@ export class ArtifactsService {
     
     // Get full artifact data using get()
     const artifact = await this.get(artifactId, notebookId);
-    
+
+    // QUIZ and FLASHCARDS both come back as API type 4 and are differentiated
+    // by a heuristic that falls back to QUIZ when ambiguous. If the caller
+    // supplied an explicit artifactType, trust it over the heuristic so
+    // flashcard files are never mis-labelled as quizzes (and vice versa).
+    if (artifactType === ArtifactType.QUIZ || artifactType === ArtifactType.FLASHCARDS) {
+      artifact.type = artifactType;
+    }
+
     // Handle different artifact types
     if (artifact.type === ArtifactType.QUIZ || artifact.type === ArtifactType.FLASHCARDS) {
       // Quiz and Flashcard: Save as JSON with all data
@@ -1867,8 +1875,8 @@ export class ArtifactsService {
         null,  // Index 10
         null,  // Index 11
         null,  // Index 12
-        null,  // Index 13 (Slides customization goes here)
-        null,  // Index 14
+        null,  // Index 13
+        null,  // Index 14 (Infographic customization goes here)
         null,  // Index 15
       );
     }
@@ -1963,17 +1971,21 @@ export class ArtifactsService {
     // Add customization based on artifact type
     // Note: Slide decks, Audio, and Video ALWAYS need customization array set, even with defaults
     if (artifactType === ArtifactType.SLIDE_DECK) {
-      // Slides customization at index 13: [[instructions, language, format, length]]
-      // Structure from mm4.txt and mm6.txt: [[null,"en",2,3]] or [["something something","en",2,3]]
-      // Always set customization array, even if no customization object provided
+      // Slides customization at index 16: [[instructions, language, format, length]]
+      // Verified via live R7cb6c capture: the customization lives at slot 16, not 13.
+      // The previous SDK wrote it at index 13 where the server silently ignored it,
+      // which is why the UI always fell back to defaults (Presenter + Default length)
+      // regardless of what the SDK sent. Slot order [instructions, language, format,
+      // length] is preserved from the original SDK.
       const slideCustom = customization as SlideDeckCustomization | undefined;
       const format = slideCustom?.format ?? 2; // 2=Presenter, 3=Detailed deck
-      const length = slideCustom?.length ?? 2; // 1=Short (5-10 slides), 2=Default (10-15 slides)
+      const length = slideCustom?.length ?? 3; // 2=Short (5-10 slides), 3=Default (10-15 slides)
       
-      (args[2] as any[])[13] = [[
+      (args[2] as any[]).push(null); // Extend to length 17 so index 16 exists
+      (args[2] as any[])[16] = [[
         instructions || null, // Description/instructions
         slideCustom?.language || defaultLanguage, // Language (default: notebook's default language)
-        format, // Format (2=presenter, 3=detailed deck)
+        format, // Format (2=Presenter, 3=Detailed deck)
         length, // Length (1=Short, 2=Default)
       ]];
     } else if (artifactType === ArtifactType.AUDIO) {
@@ -2100,18 +2112,23 @@ export class ArtifactsService {
     // Optional customization for other artifacts (only if provided)
     if (customization) {
       if (artifactType === ArtifactType.INFOGRAPHIC) {
-        // Infographic customization at index 14: [[language, "en", null, orientation, levelOfDetail]]
-        // Structure from mm10.txt: [["hi","en",null,1,1]] - customization is at index 14 (array length 15, last element)
+        // Infographic customization at index 14: [[instructions, language, null, orientation, levelOfDetail, 1]]
+        // Verified by capturing a live R7cb6c request with the prompt "XXPROBE_PROMPT_77QQ":
+        //   [["XXPROBE_PROMPT_77QQ","en",null,3,3,1]]
+        // The previous mapping had slots 0/1 swapped (language in slot 0), which is why
+        // the UI showed the language code "en" as the infographic prompt whenever no
+        // instructions were supplied.
         const infographicCustom = customization as InfographicCustomization;
         const orientation = infographicCustom.orientation ?? 1; // 1=Landscape, 2=Portrait, 3=Square
         const levelOfDetail = infographicCustom.levelOfDetail ?? 2; // 1=Concise, 2=Standard, 3=Detailed
         
         (args[2] as any[])[14] = [[
-          infographicCustom.language || defaultLanguage, // Primary language (default: notebook's default language)
-          'en', // Secondary language (always "en")
+          instructions || null, // User prompt / instructions
+          infographicCustom.language || defaultLanguage, // Language (default: notebook's default language)
           null,
-          orientation, // Orientation/visual style (1=Landscape, 2=Portrait, 3=Square)
-          levelOfDetail, // Level of detail (1=Concise, 2=Standard, 3=Detailed)
+          orientation, // 1=Landscape, 2=Portrait, 3=Square
+          levelOfDetail, // 1=Concise, 2=Standard, 3=Detailed
+          1, // Trailing flag observed in captured payload (purpose unknown; always 1)
         ]];
       } else if (artifactType === ArtifactType.VIDEO) {
         // Video customization at index 8: [null, null, [sourceIds, language, focus, null, format, visualStyle, customStyleDescription]]

@@ -152,7 +152,7 @@ async function main() {
     //   instructions: 'Create a comprehensive presentation',
     //   customization: {
     //     format: 2, // 2=Presenter slides, 3=Detailed deck
-    //     length: 2, // 1=Short, 2=Default, 3=Long
+    //     length: 3, // 2=Short (5-10 slides), 3=Default (10-15 slides)
     //     language: NotebookLMLanguage.ENGLISH, // Optional: overrides notebook default
     //     // If language is omitted, will use notebook's default language
     //   },
