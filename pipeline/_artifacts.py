@@ -65,16 +65,15 @@ class JobList(list):
         self.path = path
 
 
-def _safe_filename(s: str, maxlen: int = FILENAME_COMPONENT_MAXLEN) -> str:
-    """Strip non-filename characters; spaces are preserved."""
+def _safe_filename(s: str, maxlen: int | None = FILENAME_COMPONENT_MAXLEN) -> str:
+    """Strip non-filename characters; spaces are preserved. Pass ``maxlen=None`` to skip truncation."""
     s = re.sub(r'[^\w\s\-.]', '', s)
-    return s.strip()[:maxlen]
+    return s.strip() if maxlen is None else s.strip()[:maxlen]
 
 
 def _artifact_stem(ts_str: str, src: str) -> str:
     """Canonical artifact filename stem: ``<ts>_<src>``."""
     return f"{ts_str} {src}"
-
 
 def _print_jobs_table(jobs: list[dict], *, header: str, errors: list | None = None) -> None:
     col = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
@@ -121,42 +120,50 @@ def _parse_created_at(created_at: str) -> str:
         return ts
 
 
-def _expected_file(output_dir: Path, source_title: str, created_at: str) -> Path | None:
-    """Return the expected output file if it already exists, or None.
+def _output_stem(source_title: str, created_at: str | None, *, prefix_ts: bool) -> str | None:
+    """Single source of truth for the output filename stem.
 
-    Matches by exact stem ``<yyyymmdd_hhmmss>_<Source>`` (any extension).
-    The artifact type and notebook name are encoded in the directory path.
+    Returns ``<yyyymmdd hhmmss> <title>`` when *prefix_ts* is True,
+    or just ``<title>`` when False.
+    Returns ``None`` when *prefix_ts* is True but *created_at* is empty
+    (caller is responsible for emitting a warning and deciding what to do).
     """
+    if not prefix_ts:
+        return _safe_filename(source_title, maxlen=None)
+    src = _safe_filename(source_title)
     if not created_at:
+        return None
+    return _artifact_stem(_parse_created_at(created_at), src)
+
+
+def _expected_file(output_dir: Path, source_title: str, created_at: str, *, prefix_ts: bool = True) -> Path | None:
+    """Return the expected output file if it already exists, or None."""
+    stem = _output_stem(source_title, created_at, prefix_ts=prefix_ts)
+    if stem is None:
         print(f"⚠ FALLBACK: _expected_file called with empty createdAt for '{source_title}' — SDK returned no createdAt; skip check disabled, file will always be re-downloaded")
         return None
-    ts_str = _parse_created_at(created_at)
-    src    = _safe_filename(source_title)
-    expected_stem = _artifact_stem(ts_str, src)
     for f in output_dir.iterdir():
-        if f.stem == expected_stem:
+        if f.stem == stem:
             return f
     return None
 
 
-def _final_name(file_path: str, source_title: str, created_at: str | None = None) -> str:
-    """Rename downloaded file to ``<yyyymmdd_hhmmss>_<Source><ext>``."""
+def _final_name(file_path: str, source_title: str, created_at: str | None = None, *, prefix_ts: bool = True) -> str:
+    """Rename downloaded file to its canonical output name and return the new path."""
     p = Path(file_path)
-    if created_at:
-        ts_str = _parse_created_at(created_at)
-    else:
+    stem = _output_stem(source_title, created_at, prefix_ts=prefix_ts)
+    if stem is None:
+        # prefix_ts=True but no createdAt — fall back to timestamp embedded in the SDK filename
         print(f"⚠ FALLBACK: _final_name has no createdAt for '{source_title}' — falling back to filename timestamp")
+        src = _safe_filename(source_title)
         m = re.match(r'^.+_(\d{13})$', p.stem)
         if m:
-            ts_str = (
-                datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc)
-                .astimezone().strftime(FILENAME_TS_FORMAT)
-            )
+            ts_str = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).astimezone().strftime(FILENAME_TS_FORMAT)
         else:
             ts_str = _ts_now()
             print(f"⚠ FALLBACK: _final_name could not extract timestamp from filename {p.name!r} — using current time {ts_str}")
-    src = _safe_filename(source_title)
-    new_path = p.parent / f"{_artifact_stem(ts_str, src)}{p.suffix}"
+        stem = _artifact_stem(ts_str, src)
+    new_path = p.parent / f"{stem}{p.suffix}"
     p.rename(new_path)
     return str(new_path)
 
@@ -328,6 +335,7 @@ def download_artifacts(
     creds: dict,
     *,
     output_dir: Path | None = None,
+    _prefix_ts: bool = True,
 ) -> list[dict]:
     """Download all READY artifacts.
 
@@ -389,11 +397,24 @@ await sdk.dispose();
     skipped     = []
     to_download = []
     for j in jobs:
-        existing = _expected_file(output_dir, j["sourceTitle"], j.get("createdAt", ""))
+        existing = _expected_file(output_dir, j["sourceTitle"], j.get("createdAt", ""), prefix_ts=_prefix_ts)
         if existing:
             skipped.append({"sourceTitle": j["sourceTitle"], "filePath": str(existing), "status": "skipped"})
         else:
             to_download.append(j)
+
+    # Detect filename collisions before any download happens.
+    # Two jobs with the same output stem would cause a FileExistsError at rename time.
+    stem_map: dict[str, list[dict]] = {}
+    for j in to_download:
+        stem = _output_stem(j["sourceTitle"], j.get("createdAt") or None, prefix_ts=_prefix_ts)
+        if stem is not None:  # None means no createdAt; collision check not possible, let it proceed
+            stem_map.setdefault(stem, []).append(j)
+    for stem, dupes in stem_map.items():
+        if len(dupes) > 1:
+            titles = "\n  ".join(repr(d["sourceTitle"]) for d in dupes)
+            print(f"⚠ Aborting: {len(dupes)} artifacts would produce the same filename '{stem}':\n  {titles}\nNo files were downloaded.")
+            return []
 
     if not to_download:
         # Nothing to download — build table from skipped only and return early
@@ -445,7 +466,7 @@ await sdk.dispose();
     fresh  = data["results"]
     errors = data.get("errors", [])
     for r in fresh:
-        r["filePath"] = _final_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None)
+        r["filePath"] = _final_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None, prefix_ts=_prefix_ts)
         r["status"] = "downloaded"
 
     # Merge: preserve job order, insert skipped entries
@@ -614,7 +635,7 @@ def download_artifacts_by_type(
         return []
 
     return download_artifacts(
-        jobs, notebook_id, artifact_type, creds, output_dir=output_dir
+        jobs, notebook_id, artifact_type, creds, output_dir=output_dir, _prefix_ts=False
     )
 
 

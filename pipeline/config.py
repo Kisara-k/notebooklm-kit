@@ -17,7 +17,7 @@ OUTPUTS_SUBDIR = "outputs"  # outputs/<artifact_type_lower>/<file>
 #   <yyyymmdd_hhmmss>_<Notebook>__<Source>__<TYPE>.<ext>
 # strftime format used inside downloaded filenames.
 # This value is also used to build the skip-check glob, so it must produce
-FILENAME_COMPONENT_MAXLEN = 40
+FILENAME_COMPONENT_MAXLEN = 80
 FILENAME_TS_FORMAT = "%Y%m%d %H%M%S"
 
 # ===========================================================================
@@ -25,7 +25,7 @@ FILENAME_TS_FORMAT = "%Y%m%d %H%M%S"
 # ===========================================================================
 
 # New title pattern:  "<source title>[:RENAME_SOURCE_MAXLEN] YYMMDD HHMM"
-RENAME_SOURCE_MAXLEN = 30
+RENAME_SOURCE_MAXLEN = 80
 RENAME_TS_FORMAT = "%y%m%d %H%M%S"
 
 
