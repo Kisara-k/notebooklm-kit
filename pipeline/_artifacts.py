@@ -66,10 +66,48 @@ class JobList(list):
 
 
 def _safe_filename(s: str, maxlen: int = FILENAME_COMPONENT_MAXLEN) -> str:
-    """Strip non-filename characters and collapse whitespace."""
+    """Strip non-filename characters; spaces are preserved."""
     s = re.sub(r'[^\w\s\-.]', '', s)
-    s = re.sub(r'\s+', '_', s.strip())
-    return s[:maxlen]
+    return s.strip()[:maxlen]
+
+
+def _artifact_stem(ts_str: str, src: str) -> str:
+    """Canonical artifact filename stem: ``<ts>_<src>``."""
+    return f"{ts_str} {src}"
+
+
+def _print_jobs_table(jobs: list[dict], *, header: str, errors: list | None = None) -> None:
+    col = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
+    sep = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
+    print(header)
+    print(sep)
+    print(f"| {'#':1} | {'Source':{col}} | {'Artifact ID':44} |")
+    print(sep)
+    for i, j in enumerate(jobs):
+        print(f"| {i:1} | {j['sourceTitle']:{col}} | {j['artifactId']:44} |")
+    if errors:
+        print(sep)
+        for e in errors:
+            print(f"  x  {e['title']}: {e['error']}")
+    print(sep)
+
+
+def _print_download_table(results: list[dict], errors: list, *, header: str) -> None:
+    col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
+    sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
+    print(header)
+    print(sep)
+    print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
+    print(sep)
+    for i, r in enumerate(results):
+        fname = Path(r["filePath"]).name
+        trunc = fname if len(fname) <= 44 else fname[:41] + "..."
+        print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {r.get('status', '?'):10} |")
+    if errors:
+        print(sep)
+        for e in errors:
+            print(f"  x  {e['sourceTitle']}: {e['error']}")
+    print(sep)
 
 
 def _parse_created_at(created_at: str) -> str:
@@ -83,26 +121,26 @@ def _parse_created_at(created_at: str) -> str:
         return ts
 
 
-def _expected_file(output_dir: Path, notebook_title: str, source_title: str, artifact_type: str, created_at: str) -> Path | None:
-    """Return the exact expected output file if it already exists, or None.
+def _expected_file(output_dir: Path, source_title: str, created_at: str) -> Path | None:
+    """Return the expected output file if it already exists, or None.
 
-    The filename is ``<yyyymmdd_hhmmss>_<Notebook>__<Source>__<type>.*`` where the
-    timestamp comes from the artifact's own ``createdAt``, so each artifact generation
-    produces a unique name and an older file for the same source never causes a skip.
+    Matches by exact stem ``<yyyymmdd_hhmmss>_<Source>`` (any extension).
+    The artifact type and notebook name are encoded in the directory path.
     """
     if not created_at:
         print(f"⚠ FALLBACK: _expected_file called with empty createdAt for '{source_title}' — SDK returned no createdAt; skip check disabled, file will always be re-downloaded")
         return None
     ts_str = _parse_created_at(created_at)
-    nb   = _safe_filename(notebook_title)
-    src  = _safe_filename(source_title)
-    atype = artifact_type.upper()
-    matches = list(output_dir.glob(f"{ts_str}_{nb}__{src}__{atype}.*"))
-    return matches[0] if matches else None
+    src    = _safe_filename(source_title)
+    expected_stem = _artifact_stem(ts_str, src)
+    for f in output_dir.iterdir():
+        if f.stem == expected_stem:
+            return f
+    return None
 
 
-def _final_name(file_path: str, notebook_title: str, source_title: str, artifact_type: str, created_at: str | None = None) -> str:
-    """Rename downloaded file to ``<yyyymmdd_hhmmss>_<Notebook>__<Source>__<type><ext>``."""
+def _final_name(file_path: str, source_title: str, created_at: str | None = None) -> str:
+    """Rename downloaded file to ``<yyyymmdd_hhmmss>_<Source><ext>``."""
     p = Path(file_path)
     if created_at:
         ts_str = _parse_created_at(created_at)
@@ -117,10 +155,8 @@ def _final_name(file_path: str, notebook_title: str, source_title: str, artifact
         else:
             ts_str = _ts_now()
             print(f"⚠ FALLBACK: _final_name could not extract timestamp from filename {p.name!r} — using current time {ts_str}")
-    nb  = _safe_filename(notebook_title)
     src = _safe_filename(source_title)
-    atype = artifact_type.upper()
-    new_path = p.parent / f"{ts_str}_{nb}__{src}__{atype}{p.suffix}"
+    new_path = p.parent / f"{_artifact_stem(ts_str, src)}{p.suffix}"
     p.rename(new_path)
     return str(new_path)
 
@@ -185,22 +221,10 @@ await sdk.dispose();
     errors        = data.get("errors", [])
     notebook_name = _safe_filename(data.get("notebookTitle", notebook_id))
 
-    jobs_path = _jobs_dir(artifact_type) / f"{_ts_now()}_{notebook_name}.json"
+    jobs_path = _jobs_dir(artifact_type) / f"{_ts_now()} {notebook_name}.json"
     jobs_path.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
 
-    col = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
-    sep = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
-    print(f"\nSubmitted {len(jobs)} job(s)  \u2192  {jobs_path.relative_to(SDK_ROOT)}")
-    print(sep)
-    print(f"| {'#':1} | {'Source':{col}} | {'Artifact ID':44} |")
-    print(sep)
-    for i, j in enumerate(jobs):
-        print(f"| {i:1} | {j['sourceTitle']:{col}} | {j['artifactId']:44} |")
-    if errors:
-        print(sep)
-        for e in errors:
-            print(f"  x  {e['title']}: {e['error']}")
-    print(sep)
+    _print_jobs_table(jobs, header=f"\nSubmitted {len(jobs)} job(s)  \u2192  {jobs_path.relative_to(SDK_ROOT)}", errors=errors)
     return JobList(jobs, jobs_path)
 
 
@@ -224,15 +248,7 @@ def load_jobs(artifact_type: str, filename: str | None = None) -> list[dict]:
             raise FileNotFoundError(f"No jobs files found in {d}. Run create_artifacts first.")
         p = candidates[-1]
     jobs = json.loads(p.read_text(encoding="utf-8"))
-    col  = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
-    sep  = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
-    print(f"\nLoaded {len(jobs)} job(s) from {p.name}")
-    print(sep)
-    print(f"| {'#':1} | {'Source':{col}} | {'Artifact ID':44} |")
-    print(sep)
-    for i, j in enumerate(jobs):
-        print(f"| {i:1} | {j['sourceTitle']:{col}} | {j['artifactId']:44} |")
-    print(sep)
+    _print_jobs_table(jobs, header=f"\nLoaded {len(jobs)} job(s) from {p.name}")
     return JobList(jobs, p)
 
 
@@ -323,10 +339,6 @@ def download_artifacts(
         List of ``{sourceTitle, filePath}`` for successfully downloaded artifacts.
     """
     artifact_type = artifact_type.upper()
-    if output_dir is None:
-        output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_str = str(output_dir).replace("\\", "/")
 
     # Backfill notebookTitle / createdAt for jobs created before those fields were stored.
     # Fetch from the SDK in a single TS call rather than silently degrading.
@@ -366,12 +378,18 @@ await sdk.dispose();
         if hasattr(jobs, "path") and jobs.path.exists():
             jobs.path.write_text(json.dumps(list(jobs), indent=2), encoding="utf-8")
 
+    if output_dir is None:
+        nb_name = _safe_filename(jobs[0].get("notebookTitle", notebook_id)) if jobs else _safe_filename(notebook_id)
+        output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower() / nb_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_str = str(output_dir).replace("\\", "/")
+
     # Skip jobs whose exact output file (keyed on the artifact's own createdAt timestamp)
     # already exists locally.
     skipped     = []
     to_download = []
     for j in jobs:
-        existing = _expected_file(output_dir, j.get("notebookTitle", ""), j["sourceTitle"], artifact_type, j.get("createdAt", ""))
+        existing = _expected_file(output_dir, j["sourceTitle"], j.get("createdAt", ""))
         if existing:
             skipped.append({"sourceTitle": j["sourceTitle"], "filePath": str(existing), "status": "skipped"})
         else:
@@ -380,17 +398,7 @@ await sdk.dispose();
     if not to_download:
         # Nothing to download — build table from skipped only and return early
         results = skipped
-        col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
-        sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
-        print(f"\nDownloaded 0 / {len(jobs)} artifact(s)  ({len(skipped)} skipped)  \u2192  {output_dir}")
-        print(sep)
-        print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
-        print(sep)
-        for i, r in enumerate(results):
-            fname = Path(r["filePath"]).name
-            trunc = fname if len(fname) <= 44 else fname[:41] + "..."
-            print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {r['status']:10} |")
-        print(sep)
+        _print_download_table(results, [], header=f"\nDownloaded 0 / {len(jobs)} artifact(s)  ({len(skipped)} skipped)  \u2192  {output_dir}")
         return results
 
     if artifact_type in _DOWNLOAD_VIA_GET:
@@ -437,7 +445,7 @@ await sdk.dispose();
     fresh  = data["results"]
     errors = data.get("errors", [])
     for r in fresh:
-        r["filePath"] = _final_name(r["filePath"], r["notebookTitle"], r["sourceTitle"], artifact_type, r.get("createdAt") or None)
+        r["filePath"] = _final_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None)
         r["status"] = "downloaded"
 
     # Merge: preserve job order, insert skipped entries
@@ -449,24 +457,9 @@ await sdk.dispose();
         elif j["sourceTitle"] in {s["sourceTitle"]: s for s in skipped}:
             results.append(next(s for s in skipped if s["sourceTitle"] == j["sourceTitle"]))
 
-    col = max((len(r["sourceTitle"]) for r in results + [{"sourceTitle": "Source"}]), default=6)
-    sep = f"+---+{'-' * (col + 2)}+{'-' * 46}+{'-' * 12}+"
     n_dl   = sum(1 for r in results if r.get("status") == "downloaded")
     n_skip = sum(1 for r in results if r.get("status") == "skipped")
-    print(f"\nDownloaded {n_dl} / {len(jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
-    print(sep)
-    print(f"| {'#':1} | {'Source':{col}} | {'File':44} | {'Status':10} |")
-    print(sep)
-    for i, r in enumerate(results):
-        fname = Path(r["filePath"]).name
-        trunc = fname if len(fname) <= 44 else fname[:41] + "..."
-        status = r.get("status", "?")
-        print(f"| {i:1} | {r['sourceTitle']:{col}} | {trunc:44} | {status:10} |")
-    if errors:
-        print(sep)
-        for e in errors:
-            print(f"  x  {e['sourceTitle']}: {e['error']}")
-    print(sep)
+    _print_download_table(results, errors, header=f"\nDownloaded {n_dl} / {len(jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
     return results
 
 
