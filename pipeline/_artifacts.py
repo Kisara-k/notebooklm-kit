@@ -555,6 +555,70 @@ await sdk.dispose();
 
 
 # ---------------------------------------------------------------------------
+# Download artifacts of a given type from an existing artifacts listing
+# ---------------------------------------------------------------------------
+
+def download_artifacts_by_type(
+    artifacts: "list[dict] | dict",
+    artifact_type: str,
+    notebook_id: str,
+    creds: dict,
+    *,
+    indices: list[int] | None = None,
+    output_dir: Path | None = None,
+) -> list[dict]:
+    """Download every artifact of *artifact_type* found in *artifacts*.
+
+    Args:
+        artifacts:     list returned by ``list_artifacts``, a single artifact dict,
+                       or any plain list of artifact dicts (e.g. ``artifacts[2:5]``).
+        artifact_type: e.g. ``"FLASHCARDS"``, ``"VIDEO"``, ``"AUDIO"``,
+                       ``"SLIDE_DECK"``, ``"INFOGRAPHIC"``, ``"QUIZ"``.
+        notebook_id:   target notebook (used for the SDK fetch).
+        creds:         credentials dict.
+        indices:       optional subset of artifact indices (rows in the artifacts
+                       table) to consider; ``None`` means all.
+        output_dir:    override download folder; defaults to
+                       ``outputs/<artifact_type_lower>/<Notebook Name>/``.
+
+    Builds a synthetic jobs list from the selected artifacts and delegates to
+    :func:`download_artifacts`, so all existing behaviour (skip-if-exists,
+    notebookTitle backfill, table output, error handling) applies unchanged.
+    """
+    if isinstance(artifacts, dict):
+        artifacts = [artifacts]
+    artifact_type = artifact_type.upper()
+
+    code_for = {v: k for k, v in _ARTIFACT_TYPE_LABELS.items()}
+    if artifact_type not in code_for:
+        raise ValueError(
+            f"Unknown artifact_type {artifact_type!r}; valid: {sorted(code_for)}"
+        )
+    type_code = code_for[artifact_type]
+
+    jobs: list[dict] = []
+    for i, a in enumerate(artifacts):
+        if indices is not None and i not in indices:
+            continue
+        if a.get("type") != type_code:
+            continue
+        jobs.append({
+            "artifactId":    a["artifactId"],
+            "sourceTitle":   a.get("title") or a["artifactId"],
+            "notebookTitle": "",                       # backfilled by download_artifacts
+            "createdAt":     a.get("createdAt") or "", # backfilled if empty
+        })
+
+    if not jobs:
+        print(f"No {artifact_type} artifacts in the selected range.")
+        return []
+
+    return download_artifacts(
+        jobs, notebook_id, artifact_type, creds, output_dir=output_dir
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rename single-source artifacts to "<source title> YYMMDD HHMM"
 # ---------------------------------------------------------------------------
 
