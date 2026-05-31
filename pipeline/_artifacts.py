@@ -9,6 +9,7 @@ Download behaviour is specialised per type where the SDK requires it.
 """
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -179,6 +180,8 @@ def create_artifacts(
     customization: dict,
     instructions: str | None,
     creds: dict,
+    *,
+    dry_run: bool = False,
 ) -> list[dict]:
     """Create one artifact per source entry.
 
@@ -189,6 +192,18 @@ def create_artifacts(
         sources = [sources]
     artifact_type = artifact_type.upper()
     label = artifact_type.replace("_", " ").title()
+
+    if dry_run:
+        col = max((len(s.get("title", "")) for s in sources + [{"title": "Source"}]), default=6)
+        sep = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
+        print(f"\n[dry run] Would create {len(sources)} {label} artifact(s):")
+        print(sep)
+        print(f"| {'#':1} | {'Source':{col}} | {'Source ID':44} |")
+        print(sep)
+        for i, s in enumerate(sources):
+            print(f"| {i:1} | {s.get('title', ''):{col}} | {s.get('sourceId', ''):44} |")
+        print(sep)
+        return []
     script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
 import {{ ArtifactType }} from './src/types/artifact.js';
@@ -690,7 +705,10 @@ def rename_single_source_artifacts(
         except Exception as e:
             print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has unparseable createdAt {created!r} ({e}) — skipped")
             continue
-        new_title = f"{title_of[sid][:RENAME_SOURCE_MAXLEN]} {dt.strftime(RENAME_TS_FORMAT)}"
+        src_title = title_of[sid]
+        stem, ext = os.path.splitext(src_title)
+        src_title = stem if ext else src_title
+        new_title = f"{src_title[:RENAME_SOURCE_MAXLEN]} [{dt.strftime(RENAME_TS_FORMAT)}]"
         if new_title in (a.get("title") or ""):
             continue  # already contains the canonical name (may have extra prefix/suffix)
         targets.append({
