@@ -83,10 +83,6 @@ def _safe_filename(s: str, maxlen: int | None = FILENAME_COMPONENT_MAXLEN) -> st
     return s.strip() if maxlen is None else s.strip()[:maxlen]
 
 
-def _artifact_stem(ts_str: str, src: str) -> str:
-    """Canonical artifact filename stem: ``<ts>_<src>``."""
-    return f"{ts_str} {src}"
-
 def _print_jobs_table(jobs: list[dict], *, header: str, errors: list | None = None) -> None:
     col = max((len(j["sourceTitle"]) for j in jobs + [{"sourceTitle": "Source"}]), default=6)
     sep = f"+---+{'-' * (col + 2)}+----------------------------------------------+"
@@ -122,64 +118,62 @@ def _print_download_table(results: list[dict], errors: list, *, header: str) -> 
 
 
 def _parse_created_at(created_at: str) -> str:
-    """Convert an ISO-8601 ``createdAt`` string to ``yyyymmdd_hhmmss`` local time."""
+    """Convert an ISO-8601 ``createdAt`` string to ``YYYYMMDD HHMMSS`` local time."""
     try:
         dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
         return dt.astimezone().strftime(FILENAME_TS_FORMAT)
     except Exception as e:
-        ts = _ts_now()
+        ts = datetime.now().strftime(FILENAME_TS_FORMAT)
         print(f"⚠ FALLBACK: _parse_created_at could not parse {created_at!r} ({e}); using current time {ts}")
         return ts
 
 
-def _output_stem(source_title: str, created_at: str | None, *, prefix_ts: bool) -> str | None:
-    """Single source of truth for the output filename stem.
+def _canonical_stem(source_title: str, created_at: str | None) -> str | None:
+    """Single source of truth for output names: ``<safe_source> [YYYYMMDD HHMMSS]``.
 
-    Returns ``<yyyymmdd hhmmss> <title>`` when *prefix_ts* is True,
-    or just ``<title>`` when False.
-    Returns ``None`` when *prefix_ts* is True but *created_at* is empty
-    (caller is responsible for emitting a warning and deciding what to do).
+    Returns None when *created_at* is absent (caller must decide how to handle).
     """
-    if not prefix_ts:
-        return _safe_filename(source_title, maxlen=None)
-    src = _safe_filename(source_title)
     if not created_at:
         return None
-    return _artifact_stem(_parse_created_at(created_at), src)
+    src = _safe_filename(source_title)
+    ts  = _parse_created_at(created_at)
+    return f"{src} [{ts}]"
 
 
-def _expected_file(output_dir: Path, source_title: str, created_at: str, *, prefix_ts: bool = True) -> Path | None:
-    """Return the expected output file if it already exists, or None."""
-    stem = _output_stem(source_title, created_at, prefix_ts=prefix_ts)
+def _strip_ts_suffix(s: str) -> str:
+    """Remove a trailing ' [YYYYMMDD HHMMSS]' bracket added by canonical naming."""
+    return re.sub(r'\s*\[\d{8}\s\d{6}\]\s*$', '', s).strip()
+
+
+def _expected_file(output_dir: Path, source_title: str, created_at: str) -> Path | None:
+    """Return the existing output path for this artifact if already downloaded, else None."""
+    stem = _canonical_stem(source_title, created_at)
     if stem is None:
-        print(f"⚠ FALLBACK: _expected_file called with empty createdAt for '{source_title}' — SDK returned no createdAt; skip check disabled, file will always be re-downloaded")
+        print(f"⚠ FALLBACK: no createdAt for '{source_title}' — skip-check disabled, will re-download")
         return None
     for f in output_dir.iterdir():
-        # For files: match by stem (strips the extension, e.g. .png, .json).
-        # For directories: also match by full name (dirs have no extension to strip).
-        if f.stem == stem or (f.is_dir() and f.name == stem):
+        if f.is_dir() and f.name == stem:
+            return f
+        if not f.is_dir() and f.stem == stem:
             return f
     return None
 
 
-def _final_name(file_path: str, source_title: str, created_at: str | None = None, *, prefix_ts: bool = True) -> str:
-    """Rename downloaded file to its canonical output name and return the new path."""
-    p = Path(file_path)
-    stem = _output_stem(source_title, created_at, prefix_ts=prefix_ts)
+def _apply_canonical_name(file_path: str, source_title: str, created_at: str | None) -> str:
+    """Rename the downloaded file/dir to its canonical name and return the new path."""
+    p    = Path(file_path)
+    stem = _canonical_stem(source_title, created_at)
     if stem is None:
-        # prefix_ts=True but no createdAt — fall back to timestamp embedded in the SDK filename
-        print(f"⚠ FALLBACK: _final_name has no createdAt for '{source_title}' — falling back to filename timestamp")
+        print(f"⚠ FALLBACK: no createdAt for '{source_title}' — extracting timestamp from filename")
         src = _safe_filename(source_title)
-        m = re.match(r'^.+_(\d{13})$', p.stem)
+        m   = re.match(r'^.+_(\d{13})$', p.stem)
         if m:
-            ts_str = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).astimezone().strftime(FILENAME_TS_FORMAT)
+            ts = datetime.fromtimestamp(int(m.group(1)) / 1000, tz=timezone.utc).astimezone().strftime(FILENAME_TS_FORMAT)
         else:
-            ts_str = _ts_now()
-            print(f"⚠ FALLBACK: _final_name could not extract timestamp from filename {p.name!r} — using current time {ts_str}")
-        stem = _artifact_stem(ts_str, src)
-    # Directories have no meaningful extension; use the stem directly.  Files
-    # (e.g. .png, .json) preserve their extension.
-    suffix = "" if p.is_dir() else p.suffix
+            ts = datetime.now().strftime(FILENAME_TS_FORMAT)
+            print(f"⚠ FALLBACK: could not extract timestamp from {p.name!r} — using current time")
+        stem = f"{src} [{ts}]"
+    suffix   = "" if p.is_dir() else p.suffix
     new_path = p.parent / f"{stem}{suffix}"
     if p != new_path:
         p.rename(new_path)
@@ -366,23 +360,31 @@ def download_artifacts(
     artifact_type: str,
     creds: dict,
     *,
+    sources: list[dict] | None = None,
     output_dir: Path | None = None,
-    _prefix_ts: bool = True,
 ) -> list[dict]:
     """Download all READY artifacts.
 
-    Saves to ``outputs/<artifact_type_lower>/`` by default.
-    For VIDEO the file is named after the source title (``<title>.mp4``).
-    For all other types the SDK's default naming is used.
+    Saves to ``outputs/<artifact_type_lower>/<notebook_name>/`` by default.
+    Files are named ``<source_title> [YYYYMMDD HHMMSS].<ext>`` for single-source
+    artifacts and ``<artifact_title> [YYYYMMDD HHMMSS].<ext>`` for multi-source.
+
+    Args:
+        sources: Optional list of source dicts (from :func:`list_sources`).
+                 If omitted the function fetches them automatically.
 
     Returns:
         List of ``{sourceTitle, filePath}`` for successfully downloaded artifacts.
     """
     artifact_type = artifact_type.upper()
 
-    # Backfill notebookTitle / createdAt for jobs created before those fields were stored.
+    # Backfill notebookTitle / createdAt / artifactTitle / sourceIds for jobs that lack them.
     # Fetch from the SDK in a single TS call rather than silently degrading.
-    stale = [j for j in jobs if not j.get("notebookTitle") or not j.get("createdAt")]
+    stale = [
+        j for j in jobs
+        if not j.get("notebookTitle") or not j.get("createdAt")
+        or "sourceIds" not in j or "artifactTitle" not in j
+    ]
     if stale:
         stale_json = json.dumps([{"artifactId": j["artifactId"]} for j in stale])
         backfill_script = f"""
@@ -393,10 +395,16 @@ import {{ NotebookLMClient }} from './src/index.js';
 const notebook = await sdk.notebooks.get('{notebook_id}');
 const notebookTitle = notebook.title ?? '{notebook_id}';
 
-const enriched: Array<{{ artifactId: string; notebookTitle: string; createdAt: string }}> = [];
+const enriched: Array<{{ artifactId: string; notebookTitle: string; createdAt: string; artifactTitle: string; sourceIds: string[] }}> = [];
 for (const job of {stale_json}) {{
   const art = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
-  enriched.push({{ artifactId: job.artifactId, notebookTitle, createdAt: art.createdAt ?? '' }});
+  enriched.push({{
+    artifactId: job.artifactId,
+    notebookTitle,
+    createdAt: art.createdAt ?? '',
+    artifactTitle: art.title ?? '',
+    sourceIds: art.sourceIds ?? [],
+  }});
 }}
 console.log('__ENRICHED__' + JSON.stringify(enriched) + '__ENRICHED__');
 await sdk.dispose();
@@ -414,22 +422,50 @@ await sdk.dispose();
                         j["createdAt"] = e["createdAt"]
                     else:
                         print(f"⚠ FALLBACK: SDK returned empty createdAt for '{j['sourceTitle']}' (artifactId={j['artifactId']}) — skip check disabled for this job")
+                if "sourceIds" not in j:
+                    j["sourceIds"] = e.get("sourceIds", [])
+                if "artifactTitle" not in j:
+                    j["artifactTitle"] = e.get("artifactTitle", "")
         # Persist enriched fields back to the jobs file so future runs don't need to re-fetch
         if hasattr(jobs, "path") and jobs.path.exists():
             jobs.path.write_text(json.dumps(list(jobs), indent=2), encoding="utf-8")
 
+    # Fetch sources silently if not supplied — needed to resolve per-artifact display names.
+    if sources is None:
+        from ._sources import list_sources as _list_sources
+        sources = _list_sources(notebook_id, creds, print=False)
+
+    # Build display name for each artifact:
+    #   single-source artifact → use the source's own title
+    #   multi-source artifact  → use the artifact's title
+    _src_title = {s["sourceId"]: s["title"] for s in (sources or [])}
+
+    def _display_name(j: dict) -> str:
+        art_source_ids = j.get("sourceIds") or ([j["sourceId"]] if j.get("sourceId") else [])
+        if len(art_source_ids) == 1:
+            title = _src_title.get(art_source_ids[0])
+            if title:
+                return title
+        art_title = j.get("artifactTitle") or ""
+        return art_title if art_title else j["sourceTitle"]
+
+    # Build job copies with sourceTitle replaced by the resolved display name.
+    # This keeps the original jobs list unmodified while ensuring all downstream
+    # logic (skip check, TS script, merge) uses the correct file name.
+    display_jobs = [{**j, "sourceTitle": _display_name(j)} for j in jobs]
+
     if output_dir is None:
-        nb_name = _safe_filename(jobs[0].get("notebookTitle", notebook_id)) if jobs else _safe_filename(notebook_id)
+        nb_name = _safe_filename(display_jobs[0].get("notebookTitle", notebook_id)) if display_jobs else _safe_filename(notebook_id)
         output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower() / nb_name
     output_dir.mkdir(parents=True, exist_ok=True)
     output_str = str(output_dir).replace("\\", "/")
 
     # Skip jobs whose exact output file (keyed on the artifact's own createdAt timestamp)
-    # already exists locally.
+    # already exists locally.  Use display_jobs so the check matches the new naming.
     skipped     = []
     to_download = []
-    for j in jobs:
-        existing = _expected_file(output_dir, j["sourceTitle"], j.get("createdAt", ""), prefix_ts=_prefix_ts)
+    for j in display_jobs:
+        existing = _expected_file(output_dir, j["sourceTitle"], j.get("createdAt", ""))
         if existing:
             skipped.append({"sourceTitle": j["sourceTitle"], "filePath": str(existing), "status": "skipped"})
         else:
@@ -438,8 +474,8 @@ await sdk.dispose();
     # Detect filename collisions before any download happens.
     # Two jobs with the same output stem would cause a FileExistsError at rename time.
     stem_map: dict[str, list[dict]] = {}
-    for j in to_download:
-        stem = _output_stem(j["sourceTitle"], j.get("createdAt") or None, prefix_ts=_prefix_ts)
+    for j in to_download:  # to_download already uses display names
+        stem = _canonical_stem(j["sourceTitle"], j.get("createdAt") or None)
         if stem is not None:  # None means no createdAt; collision check not possible, let it proceed
             stem_map.setdefault(stem, []).append(j)
     for stem, dupes in stem_map.items():
@@ -451,7 +487,7 @@ await sdk.dispose();
     if not to_download:
         # Nothing to download — build table from skipped only and return early
         results = skipped
-        _print_download_table(results, [], header=f"\nDownloaded 0 / {len(jobs)} artifact(s)  ({len(skipped)} skipped)  \u2192  {output_dir}")
+        _print_download_table(results, [], header=f"\nDownloaded 0 / {len(display_jobs)} artifact(s)  ({len(skipped)} skipped)  \u2192  {output_dir}")
         return results
 
     if artifact_type in _DOWNLOAD_VIA_GET:
@@ -466,8 +502,6 @@ await sdk.dispose();
         # raw cookie strings (HTTP 302 → sign-in).  We use the same persistent
         # Playwright profile as infographic so the browser already has valid
         # Google session cookies for all domains.
-        for j in to_download:
-            j["safeStem"] = _safe_filename(j["sourceTitle"])
         dl_body = f"""  try {{
     const rpc = await sdk.getRPCClient();
     const rawList = await rpc.call(RPC.RPC_LIST_ARTIFACTS, [[2], '{notebook_id}'], '{notebook_id}');
@@ -476,8 +510,7 @@ await sdk.dispose();
       errors.push({{ sourceTitle: job.sourceTitle, error: 'no slide image URLs found in artifact list' }});
       continue;
     }}
-    const safeStem: string = (job as any).safeStem || job.artifactId;
-    const dirPath = path.join('{output_str}', `${{safeStem}}__${{Date.now()}}`);
+    const dirPath = path.join('{output_str}', job.artifactId);
     await fs.mkdir(dirPath, {{ recursive: true }});
     const page = await __pwGetPage();
     for (let i = 0; i < slideUrls.length; i++) {{
@@ -493,20 +526,15 @@ await sdk.dispose();
   }}"""
     elif artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
         # NotebookLM serves infographic PNGs from lh3.googleusercontent.com, which
-        # rejects plain HTTP requests with 403 even with valid SAPISIDHASH headers.
-        # Slide downloads in the SDK work around this with Playwright; we do the
-        # same here — launch a headless chromium with the auth cookies and let
-        # page.goto() download the image like a real browser would.
-        for j in to_download:
-            j["safeStem"] = _safe_filename(j["sourceTitle"])
+        # rejects plain HTTP requests even with valid auth headers. We launch a
+        # headless Chromium with the persistent profile and capture the download.
         dl_body = f"""  try {{
     const meta: any = await sdk.artifacts.get(job.artifactId, '{notebook_id}');
     if (!meta.imageUrl) {{
       errors.push({{ sourceTitle: job.sourceTitle, error: 'no imageUrl on infographic artifact' }});
       continue;
     }}
-    const safeStem: string = (job as any).safeStem || job.artifactId;
-    const fp = path.join('{output_str}', `${{safeStem}}__${{Date.now()}}.png`);
+    const fp = path.join('{output_str}', `${{job.artifactId}}.png`);
     await fs.mkdir('{output_str}', {{ recursive: true }});
     const bytes = await fetchInfographicImageWithPlaywright(meta.imageUrl, fp);
     results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: fp }});
@@ -648,21 +676,24 @@ await sdk.dispose();
     fresh  = data["results"]
     errors = data.get("errors", [])
     for r in fresh:
-        r["filePath"] = _final_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None, prefix_ts=_prefix_ts)
+        # r["sourceTitle"] is already the display name (passed from display_jobs)
+        r["filePath"] = _apply_canonical_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None)
         r["status"] = "downloaded"
 
-    # Merge: preserve job order, insert skipped entries
-    by_title = {r["sourceTitle"]: r for r in fresh}
-    results  = []
-    for j in jobs:
+    # Merge: preserve job order, insert skipped entries.
+    # Iterate display_jobs so titles match the display names used in fresh/skipped.
+    by_title    = {r["sourceTitle"]: r for r in fresh}
+    skipped_map = {s["sourceTitle"]: s for s in skipped}
+    results     = []
+    for j in display_jobs:
         if j["sourceTitle"] in by_title:
             results.append(by_title[j["sourceTitle"]])
-        elif j["sourceTitle"] in {s["sourceTitle"]: s for s in skipped}:
-            results.append(next(s for s in skipped if s["sourceTitle"] == j["sourceTitle"]))
+        elif j["sourceTitle"] in skipped_map:
+            results.append(skipped_map[j["sourceTitle"]])
 
     n_dl   = sum(1 for r in results if r.get("status") == "downloaded")
     n_skip = sum(1 for r in results if r.get("status") == "skipped")
-    _print_download_table(results, errors, header=f"\nDownloaded {n_dl} / {len(jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
+    _print_download_table(results, errors, header=f"\nDownloaded {n_dl} / {len(display_jobs)} artifact(s)" + (f"  ({n_skip} skipped)" if n_skip else "") + f"  \u2192  {output_dir}")
     return results
 
 
@@ -767,6 +798,7 @@ def download_artifacts_by_type(
     notebook_id: str,
     creds: dict,
     *,
+    sources: list[dict] | None = None,
     indices: list[int] | None = None,
     output_dir: Path | None = None,
 ) -> list[dict]:
@@ -779,6 +811,8 @@ def download_artifacts_by_type(
                        ``"SLIDE_DECK"``, ``"INFOGRAPHIC"``, ``"QUIZ"``.
         notebook_id:   target notebook (used for the SDK fetch).
         creds:         credentials dict.
+        sources:       optional list of source dicts (from :func:`list_sources`).
+                       If omitted, fetched automatically (silently).
         indices:       optional subset of artifact indices (rows in the artifacts
                        table) to consider; ``None`` means all.
         output_dir:    override download folder; defaults to
@@ -786,7 +820,8 @@ def download_artifacts_by_type(
 
     Builds a synthetic jobs list from the selected artifacts and delegates to
     :func:`download_artifacts`, so all existing behaviour (skip-if-exists,
-    notebookTitle backfill, table output, error handling) applies unchanged.
+    source-name resolution, notebookTitle backfill, table output, error
+    handling) applies unchanged.
     """
     if isinstance(artifacts, dict):
         artifacts = [artifacts]
@@ -807,9 +842,11 @@ def download_artifacts_by_type(
             continue
         jobs.append({
             "artifactId":    a["artifactId"],
-            "sourceTitle":   a.get("title") or a["artifactId"],
-            "notebookTitle": "",                       # backfilled by download_artifacts
-            "createdAt":     a.get("createdAt") or "", # backfilled if empty
+            # Strip any existing ' [YYYYMMDD HHMMSS]' suffix so _canonical_stem
+            # doesn't produce a double-timestamp when artifacts are already renamed.
+            "sourceTitle":   _strip_ts_suffix(a.get("title") or a["artifactId"]),
+            "notebookTitle": "",
+            "createdAt":     a.get("createdAt") or "",
         })
 
     if not jobs:
@@ -817,7 +854,7 @@ def download_artifacts_by_type(
         return []
 
     return download_artifacts(
-        jobs, notebook_id, artifact_type, creds, output_dir=output_dir, _prefix_ts=False
+        jobs, notebook_id, artifact_type, creds, sources=sources, output_dir=output_dir
     )
 
 

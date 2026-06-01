@@ -11,7 +11,7 @@ from .config import UUID_COL_WIDTH
 _STATUS = {0: "UNKNOWN", 1: "PROCESSING", 2: "READY", 3: "FAILED"}
 
 
-def list_sources(notebook_id: str, creds: dict) -> list[dict]:
+def list_sources(notebook_id: str, creds: dict, *, print: bool = True) -> list[dict]:
     """Return all sources in *notebook_id* as a list of dicts."""
     script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
@@ -41,15 +41,17 @@ await sdk.dispose();
     col_t = max((len(s["title"]) for s in sources), default=5)
     col_t = max(col_t, 5)
     UUID  = UUID_COL_WIDTH
-    sep = f"+---+{'-' * (col_t + 2)}+------------+{'-' * (UUID + 2)}+"
-    print(f"\nNotebook : {title}")
-    print(sep)
-    print(f"| # | {'Title':{col_t}} | {'Status':10} | {'Source ID':{UUID}} |")
-    print(sep)
-    for i, s in enumerate(sources):
-        if s["status"] not in _STATUS:
-            print(f"⚠ FALLBACK: unknown source status code {s['status']!r} for '{s['title']}' — displaying raw value")
-        status = _STATUS.get(s["status"], str(s["status"]))
-        print(f"| {i} | {s['title']:{col_t}} | {status:10} | {s['sourceId']:{UUID}} |")
-    print(sep)
+    if print:
+        import builtins as _b
+        sep = f"+---+{'-' * (col_t + 2)}+------------+{'-' * (UUID + 2)}+"
+        _b.print(f"\nNotebook : {title}")
+        _b.print(sep)
+        _b.print(f"| # | {'Title':{col_t}} | {'Status':10} | {'Source ID':{UUID}} |")
+        _b.print(sep)
+        for i, s in enumerate(sources):
+            if s["status"] not in _STATUS:
+                _b.print(f"⚠ FALLBACK: unknown source status code {s['status']!r} for '{s['title']}' — displaying raw value")
+            status = _STATUS.get(s["status"], str(s["status"]))
+            _b.print(f"| {i} | {s['title']:{col_t}} | {status:10} | {s['sourceId']:{UUID}} |")
+        _b.print(sep)
     return sources
