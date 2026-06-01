@@ -73,6 +73,19 @@ class JobList(list):
         self.path = path
 
 
+def _get_notebook_title(notebook_id: str, creds: dict) -> str:
+    """Fetch the human-readable title for *notebook_id* (one small API call)."""
+    script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+{_ts_client(creds)}
+const nb = await sdk.notebooks.get('{notebook_id}');
+console.log('__NB_TITLE__' + (nb.title ?? '') + '__NB_TITLE__');
+await sdk.dispose();
+"""
+    raw = run_ts("_tmp_get_nb_title", script)
+    return raw[raw.find("__NB_TITLE__") + 12 : raw.rfind("__NB_TITLE__")].strip()
+
+
 def _safe_filename(s: str, maxlen: int | None = FILENAME_COMPONENT_MAXLEN) -> str:
     """Sanitise *s* for use as a filename component.
 
@@ -378,13 +391,11 @@ def download_artifacts(
     """
     artifact_type = artifact_type.upper()
 
-    # Backfill notebookTitle / createdAt / artifactTitle / sourceIds for jobs that lack them.
-    # Fetch from the SDK in a single TS call rather than silently degrading.
-    stale = [
-        j for j in jobs
-        if not j.get("notebookTitle") or not j.get("createdAt")
-        or "sourceIds" not in j or "artifactTitle" not in j
-    ]
+    # Backfill createdAt for jobs that are missing it — the only field that cannot be
+    # derived locally.  notebookTitle, sourceIds, and artifactTitle must already be
+    # populated by the caller (download_artifacts_by_type does this from the artifact
+    # dict); if they are absent we fall back gracefully without an extra API call.
+    stale = [j for j in jobs if not j.get("createdAt")]
     if stale:
         stale_json = json.dumps([{"artifactId": j["artifactId"]} for j in stale])
         backfill_script = f"""
@@ -422,13 +433,20 @@ await sdk.dispose();
                         j["createdAt"] = e["createdAt"]
                     else:
                         print(f"⚠ FALLBACK: SDK returned empty createdAt for '{j['sourceTitle']}' (artifactId={j['artifactId']}) — skip check disabled for this job")
-                if "sourceIds" not in j:
-                    j["sourceIds"] = e.get("sourceIds", [])
-                if "artifactTitle" not in j:
-                    j["artifactTitle"] = e.get("artifactTitle", "")
+                j.setdefault("sourceIds",     e.get("sourceIds", []))
+                j.setdefault("artifactTitle", e.get("artifactTitle", ""))
+                j.setdefault("notebookTitle", e.get("notebookTitle", ""))
         # Persist enriched fields back to the jobs file so future runs don't need to re-fetch
         if hasattr(jobs, "path") and jobs.path.exists():
             jobs.path.write_text(json.dumps(list(jobs), indent=2), encoding="utf-8")
+
+    # Resolve notebook title — needed for the output directory name.
+    # Use whatever is already in a job (populated by create/backfill), or fetch once.
+    nb_title = next((j.get("notebookTitle") for j in jobs if j.get("notebookTitle")), None)
+    if nb_title is None:
+        nb_title = _get_notebook_title(notebook_id, creds)
+        for j in jobs:
+            j["notebookTitle"] = nb_title
 
     # Fetch sources silently if not supplied — needed to resolve per-artifact display names.
     if sources is None:
@@ -455,8 +473,7 @@ await sdk.dispose();
     display_jobs = [{**j, "sourceTitle": _display_name(j)} for j in jobs]
 
     if output_dir is None:
-        nb_name = _safe_filename(display_jobs[0].get("notebookTitle", notebook_id)) if display_jobs else _safe_filename(notebook_id)
-        output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower() / nb_name
+        output_dir = SDK_ROOT / OUTPUTS_SUBDIR / artifact_type.lower() / _safe_filename(nb_title, maxlen=None)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_str = str(output_dir).replace("\\", "/")
 
@@ -471,12 +488,13 @@ await sdk.dispose();
         else:
             to_download.append(j)
 
-    # Detect filename collisions before any download happens.
-    # Two jobs with the same output stem would cause a FileExistsError at rename time.
+    # Detect filename collisions before any download happens and pre-compute canonical stems.
+    # canonicalStem is passed to TS so each file is renamed immediately after download.
     stem_map: dict[str, list[dict]] = {}
-    for j in to_download:  # to_download already uses display names
+    for j in to_download:
         stem = _canonical_stem(j["sourceTitle"], j.get("createdAt") or None)
-        if stem is not None:  # None means no createdAt; collision check not possible, let it proceed
+        j["canonicalStem"] = stem  # None when createdAt is missing; TS falls back to raw path
+        if stem is not None:
             stem_map.setdefault(stem, []).append(j)
     for stem, dupes in stem_map.items():
         if len(dupes) > 1:
@@ -493,7 +511,12 @@ await sdk.dispose();
     if artifact_type in _DOWNLOAD_VIA_GET:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.get(job.artifactId, '{notebook_id}', {{ outputPath: '{output_str}' }});
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: (res as any).downloadPath as string }});
+    const rawPath: string = (res as any).downloadPath as string;
+    const stem: string | null = (job as any).canonicalStem ?? null;
+    const ext = path.extname(rawPath);
+    const finalPath = stem ? path.join(path.dirname(rawPath), stem + ext) : rawPath;
+    if (rawPath !== finalPath) await fs.rename(rawPath, finalPath);
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: finalPath }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
@@ -510,17 +533,20 @@ await sdk.dispose();
       errors.push({{ sourceTitle: job.sourceTitle, error: 'no slide image URLs found in artifact list' }});
       continue;
     }}
-    const dirPath = path.join('{output_str}', job.artifactId);
-    await fs.mkdir(dirPath, {{ recursive: true }});
+    const tmpDir = path.join('{output_str}', job.artifactId);
+    await fs.mkdir(tmpDir, {{ recursive: true }});
     const page = await __pwGetPage();
     for (let i = 0; i < slideUrls.length; i++) {{
       const resp = await page.goto(slideUrls[i], {{ waitUntil: 'networkidle', timeout: 30000 }});
       if (!resp || resp.status() >= 400) throw new Error(`HTTP ${{resp?.status()}} on slide ${{i + 1}}`);
       const buf = await resp.body();
       const slideNum = String(i + 1).padStart(2, '0');
-      await fs.writeFile(path.join(dirPath, `slide_${{slideNum}}.png`), buf);
+      await fs.writeFile(path.join(tmpDir, `slide_${{slideNum}}.png`), buf);
     }}
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: dirPath }});
+    const stem: string | null = (job as any).canonicalStem ?? null;
+    const finalDir = stem ? path.join('{output_str}', stem) : tmpDir;
+    if (tmpDir !== finalDir) await fs.rename(tmpDir, finalDir);
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: finalDir }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
@@ -534,17 +560,25 @@ await sdk.dispose();
       errors.push({{ sourceTitle: job.sourceTitle, error: 'no imageUrl on infographic artifact' }});
       continue;
     }}
-    const fp = path.join('{output_str}', `${{job.artifactId}}.png`);
+    const tmpPath = path.join('{output_str}', `${{job.artifactId}}.png`);
     await fs.mkdir('{output_str}', {{ recursive: true }});
-    const bytes = await fetchInfographicImageWithPlaywright(meta.imageUrl, fp);
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: fp }});
+    await fetchInfographicImageWithPlaywright(meta.imageUrl, tmpPath);
+    const stem: string | null = (job as any).canonicalStem ?? null;
+    const finalPath = stem ? path.join('{output_str}', stem + '.png') : tmpPath;
+    if (tmpPath !== finalPath) await fs.rename(tmpPath, finalPath);
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: finalPath }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
     else:
         dl_body = f"""  try {{
     const res = await sdk.artifacts.download(job.artifactId, '{output_str}', '{notebook_id}');
-    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: res.filePath }});
+    const rawPath: string = res.filePath;
+    const stem: string | null = (job as any).canonicalStem ?? null;
+    const ext = path.extname(rawPath);
+    const finalPath = stem ? path.join(path.dirname(rawPath), stem + ext) : rawPath;
+    if (rawPath !== finalPath) await fs.rename(rawPath, finalPath);
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: finalPath }});
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
@@ -552,8 +586,6 @@ await sdk.dispose();
     if artifact_type in _DOWNLOAD_VIA_SLIDES:
         profile_path = str((SDK_ROOT / "pipeline" / "notebooklm_profile").resolve()).replace("\\", "/")
         slide_helpers = (
-            "import * as fs from 'fs/promises';\n"
-            "import * as path from 'path';\n"
             "import { chromium, BrowserContext, Page } from 'playwright';\n"
             "import * as RPC from './src/rpc/rpc-methods.js';\n"
             "let __pwCtx: BrowserContext | null = null;\n"
@@ -609,8 +641,6 @@ await sdk.dispose();
         # attachment Content-Disposition, so Playwright fires the download event.
         profile_path = str((SDK_ROOT / "pipeline" / "notebooklm_profile").resolve()).replace("\\", "/")
         infographic_helpers = (
-            "import * as fs from 'fs/promises';\n"
-            "import * as path from 'path';\n"
             "import { chromium, BrowserContext, Page } from 'playwright';\n"
             "let __pwCtx: BrowserContext | null = null;\n"
             "let __pwPage: Page | null = null;\n"
@@ -645,15 +675,17 @@ await sdk.dispose();
         infographic_helpers = ""
         infographic_rpc = ""
 
+    known_title_json = json.dumps(nb_title)
     script = f"""
 import {{ NotebookLMClient }} from './src/index.js';
 import {{ ArtifactState }} from './src/types/artifact.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 {infographic_helpers}
 {_ts_client(creds)}
 {infographic_rpc}
 
-const notebook = await sdk.notebooks.get('{notebook_id}');
-const notebookTitle = notebook.title ?? '{notebook_id}';
+const notebookTitle: string = {known_title_json};
 
 const results: Array<{{ sourceTitle: string; notebookTitle: string; createdAt: string; filePath: string }}> = [];
 const errors:  Array<{{ sourceTitle: string; error: string }}> = [];
@@ -676,9 +708,7 @@ await sdk.dispose();
     fresh  = data["results"]
     errors = data.get("errors", [])
     for r in fresh:
-        # r["sourceTitle"] is already the display name (passed from display_jobs)
-        r["filePath"] = _apply_canonical_name(r["filePath"], r["sourceTitle"], r.get("createdAt") or None)
-        r["status"] = "downloaded"
+        r["status"] = "downloaded"  # file already renamed in TS immediately after download
 
     # Merge: preserve job order, insert skipped entries.
     # Iterate display_jobs so titles match the display names used in fresh/skipped.
@@ -845,8 +875,10 @@ def download_artifacts_by_type(
             # Strip any existing ' [YYYYMMDD HHMMSS]' suffix so _canonical_stem
             # doesn't produce a double-timestamp when artifacts are already renamed.
             "sourceTitle":   _strip_ts_suffix(a.get("title") or a["artifactId"]),
-            "notebookTitle": "",
+            "notebookTitle": "",  # not in artifact dict; directory falls back to notebook_id
             "createdAt":     a.get("createdAt") or "",
+            "sourceIds":     a.get("sourceIds") or [],
+            "artifactTitle": _strip_ts_suffix(a.get("title") or ""),
         })
 
     if not jobs:
