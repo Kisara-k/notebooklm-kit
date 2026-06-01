@@ -39,8 +39,12 @@ _DOWNLOAD_VIA_DOWNLOAD = {"FLASHCARDS", "QUIZ", "AUDIO"}
 # Bespoke: INFOGRAPHIC — sdk.artifacts.get() returns an imageUrl;
 # we fetch the PNG bytes ourselves with the auth cookies.
 _DOWNLOAD_VIA_INFOGRAPHIC = {"INFOGRAPHIC"}
+# Bespoke: SLIDE_DECK — slide images are served from lh3.googleusercontent.com,
+# which only accepts requests from an authenticated browser session (not raw
+# cookie strings). We use launchPersistentContext like infographic.
+_DOWNLOAD_VIA_SLIDES = {"SLIDE_DECK"}
 # sdk.artifacts.get(id, notebookId, { outputPath }) → { downloadPath }
-_DOWNLOAD_VIA_GET = {"VIDEO", "SLIDE_DECK"}
+_DOWNLOAD_VIA_GET = {"VIDEO"}
 
 # ArtifactType enum values (TS src/types/artifact.ts) → display label
 _ARTIFACT_TYPE_LABELS = {
@@ -151,7 +155,9 @@ def _expected_file(output_dir: Path, source_title: str, created_at: str, *, pref
         print(f"⚠ FALLBACK: _expected_file called with empty createdAt for '{source_title}' — SDK returned no createdAt; skip check disabled, file will always be re-downloaded")
         return None
     for f in output_dir.iterdir():
-        if f.stem == stem:
+        # For files: match by stem (strips the extension, e.g. .png, .json).
+        # For directories: also match by full name (dirs have no extension to strip).
+        if f.stem == stem or (f.is_dir() and f.name == stem):
             return f
     return None
 
@@ -171,8 +177,12 @@ def _final_name(file_path: str, source_title: str, created_at: str | None = None
             ts_str = _ts_now()
             print(f"⚠ FALLBACK: _final_name could not extract timestamp from filename {p.name!r} — using current time {ts_str}")
         stem = _artifact_stem(ts_str, src)
-    new_path = p.parent / f"{stem}{p.suffix}"
-    p.rename(new_path)
+    # Directories have no meaningful extension; use the stem directly.  Files
+    # (e.g. .png, .json) preserve their extension.
+    suffix = "" if p.is_dir() else p.suffix
+    new_path = p.parent / f"{stem}{suffix}"
+    if p != new_path:
+        p.rename(new_path)
     return str(new_path)
 
 
@@ -451,6 +461,36 @@ await sdk.dispose();
   }} catch (err: any) {{
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
+    elif artifact_type in _DOWNLOAD_VIA_SLIDES:
+        # Slide images are served from lh3.googleusercontent.com which rejects
+        # raw cookie strings (HTTP 302 → sign-in).  We use the same persistent
+        # Playwright profile as infographic so the browser already has valid
+        # Google session cookies for all domains.
+        for j in to_download:
+            j["safeStem"] = _safe_filename(j["sourceTitle"])
+        dl_body = f"""  try {{
+    const rpc = await sdk.getRPCClient();
+    const rawList = await rpc.call(RPC.RPC_LIST_ARTIFACTS, [[2], '{notebook_id}'], '{notebook_id}');
+    const slideUrls = extractSlideUrls(rawList, job.artifactId);
+    if (slideUrls.length === 0) {{
+      errors.push({{ sourceTitle: job.sourceTitle, error: 'no slide image URLs found in artifact list' }});
+      continue;
+    }}
+    const safeStem: string = (job as any).safeStem || job.artifactId;
+    const dirPath = path.join('{output_str}', `${{safeStem}}__${{Date.now()}}`);
+    await fs.mkdir(dirPath, {{ recursive: true }});
+    const page = await __pwGetPage();
+    for (let i = 0; i < slideUrls.length; i++) {{
+      const resp = await page.goto(slideUrls[i], {{ waitUntil: 'networkidle', timeout: 30000 }});
+      if (!resp || resp.status() >= 400) throw new Error(`HTTP ${{resp?.status()}} on slide ${{i + 1}}`);
+      const buf = await resp.body();
+      const slideNum = String(i + 1).padStart(2, '0');
+      await fs.writeFile(path.join(dirPath, `slide_${{slideNum}}.png`), buf);
+    }}
+    results.push({{ sourceTitle: job.sourceTitle, notebookTitle, createdAt: job.createdAt ?? '', filePath: dirPath }});
+  }} catch (err: any) {{
+    errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
+  }}"""
     elif artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
         # NotebookLM serves infographic PNGs from lh3.googleusercontent.com, which
         # rejects plain HTTP requests with 403 even with valid SAPISIDHASH headers.
@@ -481,7 +521,58 @@ await sdk.dispose();
     errors.push({{ sourceTitle: job.sourceTitle, error: err.message }});
   }}"""
 
-    if artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
+    if artifact_type in _DOWNLOAD_VIA_SLIDES:
+        profile_path = str((SDK_ROOT / "pipeline" / "notebooklm_profile").resolve()).replace("\\", "/")
+        slide_helpers = (
+            "import * as fs from 'fs/promises';\n"
+            "import * as path from 'path';\n"
+            "import { chromium, BrowserContext, Page } from 'playwright';\n"
+            "import * as RPC from './src/rpc/rpc-methods.js';\n"
+            "let __pwCtx: BrowserContext | null = null;\n"
+            "let __pwPage: Page | null = null;\n"
+            "async function __pwGetPage(): Promise<Page> {\n"
+            "  if (__pwPage) return __pwPage;\n"
+            "  __pwCtx = await chromium.launchPersistentContext(" + json.dumps(profile_path) + ", { headless: true });\n"
+            "  __pwPage = await __pwCtx.newPage();\n"
+            "  await __pwPage.goto('https://notebooklm.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });\n"
+            "  return __pwPage;\n"
+            "}\n"
+            "function extractSlideUrls(raw: any, artifactId: string): string[] {\n"
+            "  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;\n"
+            "  const urls: string[] = [];\n"
+            "  function search(obj: any, depth = 0): void {\n"
+            "    if (depth > 20) return;\n"
+            "    if (Array.isArray(obj)) {\n"
+            "      if (obj.length >= 3 && typeof obj[0] === 'string' &&\n"
+            "          obj[0].includes('lh3.googleusercontent.com/notebooklm/') &&\n"
+            "          typeof obj[1] === 'number' && typeof obj[2] === 'number') {\n"
+            "        let url = obj[0].replace(/\\\\u003d/g,'=').replace(/\\\\u0026/g,'&');\n"
+            "        if (!url.includes('?')) url += '?authuser=0';\n"
+            "        else if (!url.includes('authuser=0')) url += '&authuser=0';\n"
+            "        if (!urls.includes(url)) urls.push(url);\n"
+            "        return;\n"
+            "      }\n"
+            "      for (const item of obj) search(item, depth + 1);\n"
+            "    } else if (typeof obj === 'object' && obj !== null) {\n"
+            "      for (const v of Object.values(obj)) search(v, depth + 1);\n"
+            "    }\n"
+            "  }\n"
+            "  const top = Array.isArray(data[0]) ? data[0] : data;\n"
+            "  for (const entry of top) {\n"
+            "    if (!Array.isArray(entry) || entry[0] !== artifactId) continue;\n"
+            "    search(entry);\n"
+            "    break;\n"
+            "  }\n"
+            "  if (urls.length === 0) search(data);\n"
+            "  return [...new Set(urls)];\n"
+            "}\n"
+            "async function __pwClose(): Promise<void> {\n"
+            "  if (__pwCtx) { await __pwCtx.close(); __pwCtx = null; __pwPage = null; }\n"
+            "}\n"
+        )
+        infographic_helpers = slide_helpers
+        infographic_rpc = ""
+    elif artifact_type in _DOWNLOAD_VIA_INFOGRAPHIC:
         # Infographic images live on lh3.googleusercontent.com / lh3.google.com,
         # which won't accept the raw notebooklm session cookies over HTTP. The
         # only working approach is to navigate Chromium with the *persistent*

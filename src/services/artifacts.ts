@@ -4695,6 +4695,16 @@ const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
  * Extract slide image URLs from artifact RPC response
  */
 function extractSlideImageUrls(artifactData: any, targetArtifactId?: string): string[] {
+  // RPC may return a double-encoded JSON string; parse it so unicode escapes like
+  // \u003d become = and the structure can be traversed as arrays/objects.
+  if (typeof artifactData === 'string') {
+    try {
+      artifactData = JSON.parse(artifactData);
+    } catch {
+      // Not valid JSON — proceed with the raw string
+    }
+  }
+
   const urls: string[] = [];
   
   function searchForSlides(obj: any, depth = 0): void {
@@ -4705,7 +4715,8 @@ function extractSlideImageUrls(artifactData: any, targetArtifactId?: string): st
       if (obj.length >= 3 && 
           typeof obj[0] === 'string' && 
           obj[0].includes('lh3.googleusercontent.com/notebooklm/') &&
-          (obj[0].includes('=w') || obj[0].includes('=s')) &&
+          (obj[0].includes('=w') || obj[0].includes('=s') ||
+           obj[0].includes('\\u003dw') || obj[0].includes('\\u003ds')) &&
           typeof obj[1] === 'number' &&
           typeof obj[2] === 'number') {
         let url = String(obj[0]);
@@ -4728,7 +4739,9 @@ function extractSlideImageUrls(artifactData: any, targetArtifactId?: string): st
       for (const value of Object.values(obj)) {
         searchForSlides(value, depth + 1);
       }
-    } else if (typeof obj === 'string' && obj.includes('lh3.googleusercontent.com/notebooklm') && (obj.includes('=w') || obj.includes('=s'))) {
+    } else if (typeof obj === 'string' && obj.includes('lh3.googleusercontent.com/notebooklm') &&
+               (obj.includes('=w') || obj.includes('=s') ||
+                obj.includes('\\u003dw') || obj.includes('\\u003ds'))) {
       let url = obj.replace(/\\u003d/g, '=').replace(/\\u0026/g, '&');
       if (!url.includes('?')) {
         url += '?authuser=0';
@@ -4749,7 +4762,12 @@ function extractSlideImageUrls(artifactData: any, targetArtifactId?: string): st
         const artifactId = artifactEntry[0];
         if (artifactId === targetArtifactId) {
           searchForSlides(artifactEntry);
-          return Array.from(new Set(urls));
+          // Only return early if we actually found URLs; otherwise fall through
+          // to the full search (the slide images may be nested elsewhere).
+          if (urls.length > 0) {
+            return Array.from(new Set(urls));
+          }
+          break;
         }
       }
     }
@@ -4877,17 +4895,19 @@ async function downloadVideoWithPlaywright(videoUrl: string, cookies: string): P
  * Download slide images using Playwright
  */
 async function downloadSlideImages(imageUrls: string[], cookies: string): Promise<Buffer[]> {
+  // Pass cookies as a raw HTTP header rather than via addCookies(), which fails
+  // when Chrome's CDP rejects cookie objects produced by parseCookies() on
+  // certain Google cookie value formats ("Invalid cookie fields").
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     userAgent: USER_AGENT,
-    viewport: { width: 1280, height: 800 }
+    viewport: { width: 1280, height: 800 },
+    extraHTTPHeaders: {
+      'Cookie': cookies,
+    },
   });
   
   try {
-    // Set cookies
-    const parsedCookies = parseCookies(cookies);
-    await context.addCookies(parsedCookies);
-    
     const page = await context.newPage();
     const images: Buffer[] = [];
     
