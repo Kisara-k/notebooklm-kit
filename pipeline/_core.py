@@ -147,7 +147,7 @@ def run_ts(script_name: str, content: str) -> str:
     script_path.write_text(content, encoding="utf-8")
     result = subprocess.run(
         f'npx tsx "{script_path}"',
-        capture_output=True, text=True, cwd=str(SDK_ROOT), shell=True,
+        capture_output=True, text=True, encoding="utf-8", cwd=str(SDK_ROOT), shell=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"{script_name} failed:\n{result.stderr[-3000:]}")
