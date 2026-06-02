@@ -116,13 +116,18 @@ def _ts_client(creds: dict) -> str:
 await sdk.connect();"""
 
 
-def login() -> None:
-    """Run the patchright browser login and save credentials.json."""
+def login(logout: bool = False) -> None:
+    """Run the patchright browser login and save credentials.json.
+
+    Args:
+        logout: If True, clear the saved browser profile and credentials first
+                so you can sign in with a different Google account.
+    """
     login_script = Path(__file__).parent / "login.py"
-    result = subprocess.run(
-        f'python "{login_script}"',
-        cwd=str(SDK_ROOT), shell=True,
-    )
+    cmd = f'python "{login_script}"'
+    if logout:
+        cmd += " --logout"
+    result = subprocess.run(cmd, cwd=str(SDK_ROOT), shell=True)
     if result.returncode != 0:
         raise RuntimeError("Login script exited with an error.")
 

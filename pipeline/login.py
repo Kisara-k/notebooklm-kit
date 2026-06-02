@@ -3,8 +3,10 @@ Open a Chrome window to NotebookLM, wait for login, save session cookies.
 The authToken (SNlM0e) is fetched fresh on each pipeline run, so we only
 need to persist the long-lived session cookies here.
 """
+import argparse
 import asyncio
 import json
+import shutil
 from pathlib import Path
 from patchright.async_api import async_playwright
 
@@ -14,7 +16,20 @@ USER_DATA_DIR = str(HERE / "notebooklm_profile")
 CREDENTIALS_JSON = SDK_ROOT / "credentials.json"
 
 
-async def login():
+def _clear_session() -> None:
+    """Delete the saved browser profile and credentials so a fresh login is forced."""
+    profile = Path(USER_DATA_DIR)
+    if profile.exists():
+        shutil.rmtree(profile)
+        print(f"Cleared browser profile: {profile}")
+    if CREDENTIALS_JSON.exists():
+        CREDENTIALS_JSON.unlink()
+        print(f"Cleared credentials: {CREDENTIALS_JSON}")
+
+
+async def login(logout: bool = False):
+    if logout:
+        _clear_session()
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             USER_DATA_DIR,
@@ -49,4 +64,8 @@ async def login():
         await context.close()
 
 
-asyncio.run(login())
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--logout", action="store_true", help="Clear saved session before logging in")
+    args = parser.parse_args()
+    asyncio.run(login(logout=args.logout))
