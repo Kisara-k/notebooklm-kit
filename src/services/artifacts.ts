@@ -2061,7 +2061,7 @@ export class ArtifactsService {
       const customArray: any[] = [
         [sourceIdsFlat], // IMPORTANT: Wrap in extra array! [[["id1"], ["id2"]]] format
         videoCustom?.language || defaultLanguage, // Language (default: notebook's default language)
-        videoCustom?.focus || null, // "What should the AI hosts focus on?"
+        instructions || videoCustom?.focus || null, // "What should the AI hosts focus on?" — instructions take priority
         null, // Placeholder
         format,
         visualStyle === 1 ? null : visualStyle, // If Custom (1), set to null and add description at end
@@ -2149,7 +2149,7 @@ export class ArtifactsService {
         const customArray: any[] = [
           sourceIdsFlat, // [[id1], [id2]] format
           videoCustom.language || defaultLanguage, // Language (default: notebook's default language)
-          videoCustom.focus || null, // "What should the AI hosts focus on?"
+          instructions || videoCustom.focus || null, // "What should the AI hosts focus on?" — instructions take priority
           null, // Placeholder
           format,
           visualStyle === 1 ? null : visualStyle, // If Custom (1), set to null and add description at end
