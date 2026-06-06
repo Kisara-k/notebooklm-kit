@@ -944,6 +944,7 @@ def rename_single_source_artifacts(
         src_title = title_of[sid]
         stem, ext = os.path.splitext(src_title)
         src_title = stem if ext else src_title
+        src_title = src_title.replace(".", "")
         new_title = f"{src_title[:RENAME_SOURCE_MAXLEN]} [{dt.strftime(RENAME_TS_FORMAT)}]"
         if new_title in (a.get("title") or ""):
             continue  # already contains the canonical name (may have extra prefix/suffix)
