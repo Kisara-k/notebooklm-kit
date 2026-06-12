@@ -12,6 +12,7 @@ from .config import (
     CREDENTIALS_FILENAME,
     AUTH_FETCH_TIMEOUT_SEC,
     AUTH_USER_AGENT,
+    FILENAME_COMPONENT_MAXLEN,
 )
 
 
@@ -141,6 +142,16 @@ def check_tsx() -> None:
     print("tsx:", r.stdout.strip() or r.stderr.strip())
 
 
+def _safe_filename(s: str, maxlen: int | None = FILENAME_COMPONENT_MAXLEN) -> str:
+    """Sanitise *s* for use as a filename component.
+
+    Strips trailing document extensions (.txt, .pdf, .docx, …) then removes
+    characters not valid in filenames. Pass ``maxlen=None`` to skip truncation."""
+    s = re.sub(r'\.(?:txt|pdf|docx?|xlsx?|pptx?|md|html?|csv|json|xml|rtf|odt)$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'[^\w\s\-.]', '', s)
+    return s.strip() if maxlen is None else s.strip()[:maxlen]
+
+
 def run_ts(script_name: str, content: str) -> str:
     """Write *content* to ``{SDK_ROOT}/{script_name}.ts``, execute with tsx, return stdout."""
     script_path = SDK_ROOT / f"{script_name}.ts"
@@ -152,3 +163,16 @@ def run_ts(script_name: str, content: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"{script_name} failed:\n{result.stderr[-3000:]}")
     return result.stdout
+
+
+def _get_notebook_title(notebook_id: str, creds: dict) -> str:
+    """Fetch the human-readable title for *notebook_id* (one small API call)."""
+    script = f"""
+import {{ NotebookLMClient }} from './src/index.js';
+{_ts_client(creds)}
+const nb = await sdk.notebooks.get('{notebook_id}');
+console.log('__NB_TITLE__' + (nb.title ?? '') + '__NB_TITLE__');
+await sdk.dispose();
+"""
+    raw = run_ts("_tmp_get_nb_title", script)
+    return raw[raw.find("__NB_TITLE__") + 12 : raw.rfind("__NB_TITLE__")].strip()
