@@ -57,30 +57,40 @@ def _fetch_auth_token(cookie_str: str) -> str:
     )
 
 
+def _credentials_file(profile: str = "default") -> Path:
+    if profile == "default":
+        return SDK_ROOT / CREDENTIALS_FILENAME
+    return SDK_ROOT / f"credentials.{profile}.json"
+
+
 def load_credentials(
     mode: Literal["auto", "cookies", "patchright"] = "auto",
+    profile: str = "default",
 ) -> dict:
     """Load credentials, returning ``{"mode": "cookies", "authToken": ..., "cookies": ...}``.
 
-    * ``"patchright"`` — reads ``credentials.json`` saved by ``pipeline/login.py``.
+    * ``"patchright"`` — reads the credentials file saved by ``pipeline/login.py``.
     * ``"cookies"``   — reads ``NOTEBOOKLM_AUTH_TOKEN`` + ``NOTEBOOKLM_COOKIES`` from ``.env``.
     * ``"auto"``      — tries patchright first, falls back to cookies.
+
+    Args:
+        profile: Named profile to load (default: ``"default"``).
     """
-    creds_file = SDK_ROOT / CREDENTIALS_FILENAME
+    profile = profile or "default"
+    creds_file = _credentials_file(profile)
 
     if mode == "patchright":
         if not creds_file.exists():
             raise RuntimeError(
-                "credentials.json not found. Run the login script first:\n"
-                "  python pipeline/login.py"
+                f"{creds_file.name} not found. Run the login script first:\n"
+                f"  python pipeline/login.py --profile {profile}"
             )
         data = json.loads(creds_file.read_text(encoding="utf-8"))
         cookies = data["cookies"]
         auth_token = _fetch_auth_token(cookies)
-        # Update the file with the fresh token for the TS SDK to pick up
         data["authToken"] = auth_token
         creds_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        print(f"Credentials ready — token: {len(auth_token)} chars, cookies: {len(cookies)} chars")
+        print(f"Credentials ready [{profile}] — token: {len(auth_token)} chars, cookies: {len(cookies)} chars")
         return {"mode": "cookies", "authToken": auth_token, "cookies": cookies}
 
     # cookies / auto: read from .env
@@ -89,10 +99,10 @@ def load_credentials(
 
     if mode == "auto":
         if creds_file.exists():
-            print("credentials: using patchright (credentials.json found)")
-            return load_credentials("patchright")
+            print(f"credentials: using patchright ({creds_file.name} found)")
+            return load_credentials("patchright", profile=profile)
         if has_cookies:
-            print("ℹ credentials: credentials.json not found — falling back to .env cookies")
+            print(f"ℹ credentials: {creds_file.name} not found — falling back to .env cookies")
             mode = "cookies"
         else:
             raise RuntimeError(
@@ -117,15 +127,19 @@ def _ts_client(creds: dict) -> str:
 await sdk.connect();"""
 
 
-def login(logout: bool = False) -> None:
-    """Run the patchright browser login and save credentials.json.
+def login(profile: str = "default", logout: bool = False) -> None:
+    """Run the patchright browser login and save credentials.
 
     Args:
-        logout: If True, clear the saved browser profile and credentials first
-                so you can sign in with a different Google account.
+        profile: Named profile to use. Each profile keeps its own browser
+                 session, so use different names to stay logged in to multiple
+                 Google accounts simultaneously (e.g. ``"work"``, ``"personal"``).
+        logout:  If True, clear the saved profile and credentials first so you
+                 are forced to log in again.
     """
+    profile = profile or "default"
     login_script = Path(__file__).parent / "login.py"
-    cmd = f'python "{login_script}"'
+    cmd = f'python "{login_script}" --profile {profile}'
     if logout:
         cmd += " --logout"
     result = subprocess.run(cmd, cwd=str(SDK_ROOT), shell=True)

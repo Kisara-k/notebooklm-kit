@@ -25,7 +25,7 @@ src/**/*.d.ts.map
 .npmrc
 
 # Credentials (contains sensitive auth data)
-credentials.json
+credentials*.json
 
 # IDE
 .vscode/
@@ -105,4 +105,5 @@ downloads/
 jobs/
 outputs/
 pipeline/notebooklm_profile
+pipeline/profiles
 notebooklm-local/
