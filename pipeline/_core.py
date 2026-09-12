@@ -35,8 +35,8 @@ def _parse_dotenv(path: Path) -> dict:
     return result
 
 
-def _fetch_auth_token(cookie_str: str) -> str:
-    """Fetch a fresh SNlM0e CSRF token from the NotebookLM page using saved cookies."""
+def _fetch_auth_metadata(cookie_str: str) -> dict[str, str]:
+    """Fetch live WIZ request metadata and reject sign-in/interstitial pages."""
     req = urllib.request.Request(
         "https://notebook.google.com/",
         headers={
@@ -48,12 +48,19 @@ def _fetch_auth_token(cookie_str: str) -> str:
     )
     with urllib.request.urlopen(req, timeout=AUTH_FETCH_TIMEOUT_SEC) as resp:
         html = resp.read().decode("utf-8", errors="replace")
+
     m = re.search(r'"SNlM0e"\s*:\s*"([^"]+)"', html)
-    if m:
-        return m.group(1)
+    sid = re.search(r'"FdrFJe"\s*:\s*"([^"]+)"', html)
+    build = re.search(r'"cfb2h"\s*:\s*"([^"]+)"', html)
+    if m and sid and build:
+        return {
+            "authToken": m.group(1),
+            "sessionId": sid.group(1),
+            "buildLabel": build.group(1),
+        }
     raise RuntimeError(
-        "Could not extract SNlM0e token from NotebookLM — cookies may be expired.\n"
-        "Run: python pipeline/login.py"
+        "Gemini Notebook did not expose complete session metadata. "
+        "The saved cookies may be expired."
     )
 
 
@@ -87,15 +94,19 @@ def load_credentials(
             )
         data = json.loads(creds_file.read_text(encoding="utf-8"))
         cookies = data["cookies"]
-        auth_token = _fetch_auth_token(cookies)
-        data["authToken"] = auth_token
+        metadata = _fetch_auth_metadata(cookies)
+        data.update(metadata)
         creds_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        print(f"Credentials ready [{profile}] — token: {len(auth_token)} chars, cookies: {len(cookies)} chars")
-        return {"mode": "cookies", "authToken": auth_token, "cookies": cookies}
+        print(f"Credentials ready [{profile}] — session metadata refreshed, cookies: {len(cookies)} chars")
+        return {
+            "mode": "cookies",
+            "cookies": cookies,
+            **metadata,
+        }
 
     # cookies / auto: read from .env
     env = _parse_dotenv(SDK_ROOT / ".env")
-    has_cookies = bool(env.get("NOTEBOOKLM_AUTH_TOKEN") and env.get("NOTEBOOKLM_COOKIES"))
+    has_cookies = bool(env.get("NOTEBOOKLM_COOKIES"))
 
     if mode == "auto":
         if creds_file.exists():
@@ -107,21 +118,29 @@ def load_credentials(
         else:
             raise RuntimeError(
                 "No credentials found. Run login.py or add "
-                "NOTEBOOKLM_AUTH_TOKEN + NOTEBOOKLM_COOKIES to .env"
+                "NOTEBOOKLM_COOKIES to .env"
             )
 
     if not has_cookies:
-        raise RuntimeError("NOTEBOOKLM_AUTH_TOKEN or NOTEBOOKLM_COOKIES missing from .env")
-    auth_token = env["NOTEBOOKLM_AUTH_TOKEN"]
+        raise RuntimeError("NOTEBOOKLM_COOKIES missing from .env")
     cookies = env["NOTEBOOKLM_COOKIES"]
-    print(f"Credentials loaded (cookies) — token: {len(auth_token)} chars")
-    return {"mode": "cookies", "authToken": auth_token, "cookies": cookies}
+    metadata = _fetch_auth_metadata(cookies)
+    print("Credentials loaded (cookies) — session metadata refreshed")
+    return {
+        "mode": "cookies",
+        "cookies": cookies,
+        **metadata,
+    }
 
 
 def _ts_client(creds: dict) -> str:
     return f"""const sdk = new NotebookLMClient({{
   authToken: {json.dumps(creds["authToken"])},
   cookies:   {json.dumps(creds["cookies"])},
+  urlParams: {{
+    'f.sid': {json.dumps(creds["sessionId"])},
+    'bl': {json.dumps(creds["buildLabel"])},
+  }},
   autoRefresh: false,
 }});
 await sdk.connect();"""

@@ -586,9 +586,7 @@ export class StreamingClient {
     this.requestCounter++;
 
     const batchClient = (this.config as any).batchClient;
-    // Default fSid value (fallback if not provided via config)
-    // This is a public constant used by Google's streaming API
-    let fSid = '-7958112141384765164';
+    let fSid: string | undefined;
 
     if (batchClient?.config?.urlParams?.['f.sid']) {
       fSid = batchClient.config.urlParams['f.sid'];
@@ -597,10 +595,11 @@ export class StreamingClient {
     }
 
     const sourcePath = `/notebook/${notebookId}`;
+    const buildLabel =
+      this.config.urlParams?.['bl'] || 'boq_labs-tailwind-frontend_20260802.02_p0';
 
     const params = new URLSearchParams({
-      bl: 'boq_labs-tailwind-frontend_20260101.17_p0',
-      'f.sid': fSid,
+      bl: buildLabel,
       hl: 'en',
       authuser: this.config.authUser || '0',
       pageId: 'none',
@@ -608,6 +607,7 @@ export class StreamingClient {
       rt: 'c',
       'source-path': sourcePath,
     });
+    if (fSid) params.set('f.sid', fSid);
 
     return `https://notebook.google.com/_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed?${params.toString()}`;
   }

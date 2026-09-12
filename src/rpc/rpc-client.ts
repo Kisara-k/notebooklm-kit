@@ -49,9 +49,7 @@ export class RPCClient {
         ...config.headers,
       },
       urlParams: {
-        // Update to January 2025 build version
-        'bl': 'boq_labs-tailwind-frontend_20250129.00_p0',
-        'f.sid': '-7121977511756781186',
+        'bl': 'boq_labs-tailwind-frontend_20260802.02_p0',
         'hl': 'en',
         'authuser': config.authUser || '0', // Default: 0, configurable for multi-account support
         ...config.urlParams,
