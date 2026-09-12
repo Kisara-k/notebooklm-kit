@@ -61,16 +61,16 @@ async def login(profile: str = DEFAULT_PROFILE, logout: bool = False):
             ],
         )
         page = await context.new_page()
-        await page.goto("https://notebooklm.google.com/", wait_until="domcontentloaded")
+        await page.goto("https://notebook.google.com/", wait_until="domcontentloaded")
 
         if "accounts.google.com" in page.url:
             print("Log in to your Google account in the browser window.")
-            await page.wait_for_url("https://notebooklm.google.com/**", timeout=300000)
+            await page.wait_for_url("https://notebook.google.com/**", timeout=300000)
 
         print("On NotebookLM — waiting for page to settle...")
         await page.wait_for_load_state("networkidle", timeout=20000)
 
-        raw_cookies = await context.cookies("https://notebooklm.google.com")
+        raw_cookies = await context.cookies("https://notebook.google.com")
         cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in raw_cookies)
         print(f"Cookies saved ({len(raw_cookies)} entries, {len(cookie_str)} chars)")
 

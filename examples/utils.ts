@@ -97,7 +97,7 @@ async function extractCredentialsFromBrowser(waitSeconds: number = 60, keepOpen:
     const page = await context.newPage();
     
     // Navigate to NotebookLM
-    await page.goto('https://notebooklm.google.com/', { 
+    await page.goto('https://notebook.google.com/', { 
       waitUntil: 'domcontentloaded',
       timeout: 60000 
     });

@@ -673,7 +673,7 @@ export class ArtifactsService {
     if (Array.isArray(response)) {
       if (response.length === 0) {
         success = true;
-        shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+        shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       } else {
         const data = response[0];
         if (Array.isArray(data)) {
@@ -686,20 +686,20 @@ export class ArtifactsService {
           shareUrl = data.shareUrl;
           success = data.success !== false;
         } else {
-          shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+          shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
           success = true;
         }
       }
     } else if (response && typeof response === 'object') {
-      shareUrl = response.shareUrl || `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = response.shareUrl || `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       success = response.success !== false;
     } else {
-      shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       success = true;
     }
     
     if (!shareUrl) {
-      shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
     }
     
     if (!success) {
@@ -4508,7 +4508,7 @@ async function downloadWithNodeHttp(url: string, cookies?: string): Promise<Uint
     const headers: Record<string, string> = {
       'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8,en-US;q=0.7',
-      'Referer': 'https://notebooklm.google.com/',
+      'Referer': 'https://notebook.google.com/',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
       'sec-fetch-dest': 'image',
       'sec-fetch-mode': 'no-cors',
@@ -4551,14 +4551,14 @@ async function downloadWithFetch(url: string, cookies?: string): Promise<Uint8Ar
   const headers: Record<string, string> = {
     'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8,en-US;q=0.7',
-    'Referer': 'https://notebooklm.google.com/',
+    'Referer': 'https://notebook.google.com/',
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
     'sec-fetch-dest': 'image',
     'sec-fetch-mode': 'no-cors',
     'sec-fetch-site': 'cross-site',
   };
   if (url.includes('rd-notebooklm') || url.includes('notebooklm')) {
-    headers['Origin'] = 'https://notebooklm.google.com';
+    headers['Origin'] = 'https://notebook.google.com';
   }
   if (cookies && cookies.trim()) {
     headers['Cookie'] = cookies;
@@ -4819,7 +4819,7 @@ async function downloadImageWithPlaywright(url: string, page: Page): Promise<Buf
 /**
  * Parse cookie string into Playwright cookie format
  */
-function parseCookies(cookieString: string, domain: string = 'notebooklm.google.com'): Array<{ name: string; value: string; domain: string; path: string }> {
+function parseCookies(cookieString: string, domain: string = 'notebook.google.com'): Array<{ name: string; value: string; domain: string; path: string }> {
   const cookies: Array<{ name: string; value: string; domain: string; path: string }> = [];
   const pairs = cookieString.split(';');
   
@@ -5105,8 +5105,8 @@ function downloadPdfFromUrl(url: string, cookies: string): Promise<Uint8Array> {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'identity',
-        'Referer': 'https://notebooklm.google.com/',
-        'Origin': 'https://notebooklm.google.com',
+        'Referer': 'https://notebook.google.com/',
+        'Origin': 'https://notebook.google.com',
       },
     };
     const req = httpModule.request(options, (res) => {
@@ -5662,7 +5662,7 @@ async function followRedirectsToFinalUrl(
       'Accept-Encoding': 'identity;q=1, *;q=0',
       'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8,en-US;q=0.7',
       'Range': 'bytes=0-',
-      'Referer': 'https://notebooklm.google.com/',
+      'Referer': 'https://notebook.google.com/',
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
       'sec-ch-ua': '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
       'sec-fetch-dest': 'video',
@@ -5984,7 +5984,7 @@ function extractSAPISID(cookies: string): string | null {
  * Generate SAPISIDHASH for authorization
  */
 function generateSAPISIDHASH(sapisid: string, timestamp: number): string {
-  const origin = 'https://notebooklm.google.com';
+  const origin = 'https://notebook.google.com';
   const data = `${timestamp} ${sapisid} ${origin}`;
   const hash = createHash('sha1');
   hash.update(data);
@@ -6025,8 +6025,8 @@ async function preAuthenticateForDownload(cookies: string): Promise<void> {
             'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8,en-US;q=0.7',
             'Content-Type': 'text/plain;charset=UTF-8',
             'Cookie': cookies,
-            'Origin': 'https://notebooklm.google.com',
-            'Referer': 'https://notebooklm.google.com/',
+            'Origin': 'https://notebook.google.com',
+            'Referer': 'https://notebook.google.com/',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
           },
         }, (res: any) => {
@@ -6051,8 +6051,8 @@ async function preAuthenticateForDownload(cookies: string): Promise<void> {
             'Accept-Language': 'en-IN,en-GB;q=0.9,en;q=0.8,en-US;q=0.7',
             'Content-Type': 'text/plain;charset=UTF-8',
             'Cookie': cookies,
-            'Origin': 'https://notebooklm.google.com',
-            'Referer': 'https://notebooklm.google.com/',
+            'Origin': 'https://notebook.google.com',
+            'Referer': 'https://notebook.google.com/',
           },
           body: '[]',
           signal: AbortSignal.timeout(5000),

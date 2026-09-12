@@ -33,14 +33,14 @@ export class RPCClient {
     
     // Build batch execute config
     const batchConfig: BatchExecuteConfig = {
-      host: 'notebooklm.google.com',
+      host: 'notebook.google.com',
       app: 'LabsTailwindUi',
       authToken: config.authToken,
       cookies: config.cookies,
       headers: {
         'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        'origin': 'https://notebooklm.google.com',
-        'referer': 'https://notebooklm.google.com/',
+        'origin': 'https://notebook.google.com',
+        'referer': 'https://notebook.google.com/',
         'x-same-domain': '1',
         'accept': '*/*',
         'accept-language': 'en-US,en;q=0.9',

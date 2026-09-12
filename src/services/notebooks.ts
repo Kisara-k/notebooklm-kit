@@ -297,7 +297,7 @@ export class NotebooksService {
       if (response.length === 0) {
         // Empty array means success - construct share URL from notebook ID
         success = true;
-        shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+        shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       } else {
         // Response contains data
         const data = response[0];
@@ -312,22 +312,22 @@ export class NotebooksService {
           success = data.success !== false;
         } else {
           // Fallback: construct from notebook ID
-          shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+          shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
           success = true;
         }
       }
     } else if (response && typeof response === 'object') {
-      shareUrl = response.shareUrl || `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = response.shareUrl || `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       success = response.success !== false;
     } else {
       // Fallback: construct from notebook ID
-      shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
       success = true;
     }
     
     // If shareUrl is still empty, construct from notebook ID
     if (!shareUrl) {
-      shareUrl = `https://notebooklm.google.com/notebook/${trimmedNotebookId}`;
+      shareUrl = `https://notebook.google.com/notebook/${trimmedNotebookId}`;
     }
     
     // If share failed, return minimal result
@@ -420,7 +420,7 @@ export class NotebooksService {
       }
       
       // Extract shareUrl - may not be in this response, construct from notebookId
-      const shareUrl = sharingData?.shareUrl || `https://notebooklm.google.com/notebook/${notebookId}`;
+      const shareUrl = sharingData?.shareUrl || `https://notebook.google.com/notebook/${notebookId}`;
       
       // Access type: 1 = anyone with link, 2 = restricted
       // We need to infer from the sharing state - if there are users and link is enabled
@@ -465,7 +465,7 @@ export class NotebooksService {
     } catch (error) {
       // Return minimal info if parsing fails
       return {
-        shareUrl: `https://notebooklm.google.com/notebook/${notebookId}`,
+        shareUrl: `https://notebook.google.com/notebook/${notebookId}`,
         accessType: 2,
         isShared: false,
       };

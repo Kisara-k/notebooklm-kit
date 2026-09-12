@@ -105,8 +105,8 @@ export class RefreshClient {
         'Authorization': `SAPISIDHASH ${timestamp}_${authHash}`,
         'Content-Type': 'application/json+protobuf',
         'Cookie': this.cookies,
-        'Origin': 'https://notebooklm.google.com',
-        'Referer': 'https://notebooklm.google.com/',
+        'Origin': 'https://notebook.google.com',
+        'Referer': 'https://notebook.google.com/',
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
       },
       body: requestBody,
@@ -145,7 +145,7 @@ export class RefreshClient {
    * Format: SHA1(timestamp + " " + SAPISID + " " + origin)
    */
   private generateSAPISIDHASH(timestamp: number): string {
-    const origin = 'https://notebooklm.google.com';
+    const origin = 'https://notebook.google.com';
     const data = `${timestamp} ${this.sapisid} ${origin}`;
     
     const hash = createHash('sha1');
@@ -197,7 +197,7 @@ export function parseAuthToken(token: string): { tokenValue: string; expiryTime:
  */
 export async function extractGSessionId(cookies: string): Promise<string | null> {
   try {
-  const response = await fetch('https://notebooklm.google.com/', {
+  const response = await fetch('https://notebook.google.com/', {
     headers: {
       'Cookie': cookies,
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
