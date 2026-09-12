@@ -871,6 +871,30 @@ def download_artifacts_by_type(
 # Rename single-source artifacts to "<source title> YYMMDD HHMM"
 # ---------------------------------------------------------------------------
 
+def _ts_format_to_regex(fmt: str) -> str:
+    """Translate a strftime timestamp format into a regex matching its output."""
+    out: list[str] = []
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == "%" and i + 1 < len(fmt):
+            code = fmt[i + 1]
+            if code == "Y":
+                out.append(r"\d{4}")
+            elif code in "ymdHMS":
+                out.append(r"\d{2}")
+            else:
+                out.append(re.escape(fmt[i : i + 2]))
+            i += 2
+        else:
+            out.append(re.escape(fmt[i]))
+            i += 1
+    return "".join(out)
+
+
+# Matches a trailing canonical timestamp suffix, e.g. " [260623 143000]"
+_TS_SUFFIX_RE = re.compile(r"\s*\[" + _ts_format_to_regex(RENAME_TS_FORMAT) + r"\]\s*$")
+
+
 def rename_single_source_artifacts(
     artifacts: "list[dict] | dict",
     sources: list[dict],
@@ -879,7 +903,12 @@ def rename_single_source_artifacts(
     indices: list[int] | None = None,
     dry_run: bool = False,
 ) -> list[dict]:
-    """Rename every single-source artifact to ``<source title> YYMMDD HHMM``.
+    """Rename artifacts to carry a canonical ``[YYMMDD HHMMSS]`` timestamp.
+
+    Single-source artifacts are renamed to ``<source title> [YYMMDD HHMMSS]``.
+    Multi-source artifacts keep their existing title and simply get the
+    timestamp suffix appended — unless they already end with one, in which
+    case they are left unchanged.
 
     Args:
         artifacts: list returned by ``list_artifacts``, a single artifact dict,
@@ -902,13 +931,6 @@ def rename_single_source_artifacts(
     for i, a in enumerate(artifacts):
         if indices is not None and i not in indices:
             continue
-        sids = a.get("sourceIds") or []
-        if len(sids) != 1:
-            continue
-        sid = sids[0]
-        if sid not in title_of:
-            print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' references unknown sourceId {sid!r} — skipped")
-            continue
         created = a.get("createdAt") or ""
         if not created:
             print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has empty createdAt — skipped (cannot build timestamp)")
@@ -918,22 +940,37 @@ def rename_single_source_artifacts(
         except Exception as e:
             print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' has unparseable createdAt {created!r} ({e}) — skipped")
             continue
-        src_title = title_of[sid]
-        stem, ext = os.path.splitext(src_title)
-        src_title = stem if ext else src_title
-        src_title = src_title.replace(".", "")
-        new_title = f"{src_title[:RENAME_SOURCE_MAXLEN]} [{dt.strftime(RENAME_TS_FORMAT)}]"
-        if new_title in (a.get("title") or ""):
-            continue  # already contains the canonical name (may have extra prefix/suffix)
+        ts = dt.strftime(RENAME_TS_FORMAT)
+        old_title = a.get("title") or ""
+        sids = a.get("sourceIds") or []
+
+        if len(sids) == 1:
+            sid = sids[0]
+            if sid not in title_of:
+                print(f"⚠ FALLBACK: artifact #{i} '{a.get('title')}' references unknown sourceId {sid!r} — skipped")
+                continue
+            src_title = title_of[sid]
+            stem, ext = os.path.splitext(src_title)
+            src_title = stem if ext else src_title
+            src_title = src_title.replace(".", "")
+            new_title = f"{src_title[:RENAME_SOURCE_MAXLEN]} [{ts}]"
+            if new_title in old_title:
+                continue  # already contains the canonical name (may have extra prefix/suffix)
+        else:
+            # Multi-source: keep the existing title, just append the timestamp suffix
+            # unless one is already present.
+            if _TS_SUFFIX_RE.search(old_title):
+                continue
+            new_title = f"{old_title} [{ts}]"
         targets.append({
             "index":      i,
             "artifactId": a["artifactId"],
-            "oldTitle":   a.get("title") or "",
+            "oldTitle":   old_title,
             "newTitle":   new_title,
         })
 
     if not targets:
-        print("No single-source artifacts to rename.")
+        print("No artifacts to rename.")
         return []
 
     col_o = max(len(t["oldTitle"]) for t in targets)
@@ -941,7 +978,7 @@ def rename_single_source_artifacts(
     col_o = max(col_o, 8)
     col_n = max(col_n, 8)
     sep = f"+----+{'-' * (col_o + 2)}+{'-' * (col_n + 2)}+----------+"
-    print(f"\n{'DRY RUN — ' if dry_run else ''}Renaming {len(targets)} single-source artifact(s)")
+    print(f"\n{'DRY RUN — ' if dry_run else ''}Renaming {len(targets)} artifact(s)")
     print(sep)
     print(f"| {'#':2} | {'Old title':{col_o}} | {'New title':{col_n}} | {'Status':8} |")
     print(sep)
