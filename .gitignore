@@ -70,7 +70,7 @@ _tmp*.ts
 .turbo/
 
 # RPC directory
-rpc/
+# rpc/
 test/
 nlm/
 
