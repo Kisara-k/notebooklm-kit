@@ -141,7 +141,7 @@ async function extractCredentials(page: Page, debug: boolean = false): Promise<C
   }
   
   // Navigate to NotebookLM
-  await page.goto('https://notebooklm.google.com/', { 
+  await page.goto('https://notebook.google.com/', { 
     waitUntil: 'domcontentloaded',
     timeout: 60000 
   });
@@ -191,7 +191,7 @@ async function extractCredentials(page: Page, debug: boolean = false): Promise<C
   }
   
   // Automatically extract cookies from browser context
-  // Get cookies that would be sent to notebooklm.google.com
+  // Get cookies that would be sent to notebook.google.com
   if (debug) {
     console.log('Extracting cookies from browser context...');
   }
@@ -209,11 +209,11 @@ async function extractCredentials(page: Page, debug: boolean = false): Promise<C
       // Ignore if document.cookie is not accessible
     }
     
-    // Method 2: Get cookies from browser context for notebooklm.google.com
-    const contextCookies = await page.context().cookies('https://notebooklm.google.com');
+    // Method 2: Get cookies from browser context for notebook.google.com
+    const contextCookies = await page.context().cookies('https://notebook.google.com');
     
     if (debug) {
-      console.log(`Found ${contextCookies.length} cookies from context for notebooklm.google.com`);
+      console.log(`Found ${contextCookies.length} cookies from context for notebook.google.com`);
     }
     
     // Build a map of unique cookies (prefer context cookies as they're more complete)
@@ -232,9 +232,9 @@ async function extractCredentials(page: Page, debug: boolean = false): Promise<C
     
     // Then, add/override with context cookies (these include HttpOnly cookies)
     for (const cookie of contextCookies) {
-      // Only include cookies that are relevant for notebooklm.google.com
+      // Only include cookies that are relevant for notebook.google.com
       const domain = cookie.domain || '';
-      if (domain.includes('notebooklm.google.com') || 
+      if (domain.includes('notebook.google.com') || 
           domain.includes('.google.com') || 
           domain === '' ||
           !domain) {
@@ -295,7 +295,7 @@ function promptForCookies(): Promise<string> {
     console.log('\n📋 Please copy cookies from your browser:');
     console.log('   1. Open DevTools (F12) in the browser');
     console.log('   2. Go to Network tab');
-    console.log('   3. Click on any request to notebooklm.google.com');
+    console.log('   3. Click on any request to notebook.google.com');
     console.log('   4. Copy the "Cookie" header value');
     console.log('   5. Paste it below\n');
     

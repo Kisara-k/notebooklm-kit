@@ -609,7 +609,7 @@ export class StreamingClient {
       'source-path': sourcePath,
     });
 
-    return `https://notebooklm.google.com/_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed?${params.toString()}`;
+    return `https://notebook.google.com/_/LabsTailwindUi/data/google.internal.labs.tailwind.orchestration.v1.LabsTailwindOrchestrationService/GenerateFreeFormStreamed?${params.toString()}`;
   }
 
   /**
@@ -620,8 +620,8 @@ export class StreamingClient {
       'accept': '*/*',
       'accept-language': 'en-US,en;q=0.9',
       'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      'origin': 'https://notebooklm.google.com',
-      'referer': 'https://notebooklm.google.com/',
+      'origin': 'https://notebook.google.com',
+      'referer': 'https://notebook.google.com/',
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-origin',

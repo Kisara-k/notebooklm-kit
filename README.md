@@ -690,7 +690,7 @@ await sdk.connect();
 <details>
 <summary><strong>Getting Credentials</strong></summary>
 
-1. **Auth Token**: Open https://notebooklm.google.com → DevTools (F12) → Console → Run: `window.WIZ_global_data.SNlM0e`
+1. **Auth Token**: Open https://notebook.google.com → DevTools (F12) → Console → Run: `window.WIZ_global_data.SNlM0e`
 2. **Cookies**: DevTools → Network tab → Any request → Headers → Copy Cookie value
 
 </details>

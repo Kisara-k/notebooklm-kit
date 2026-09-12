@@ -202,7 +202,7 @@ async function main() {
         console.error('The NotebookLM service is currently unavailable.');
         console.error('This might be a temporary outage. Please try:');
         console.error('  1. Wait a few minutes and try again');
-        console.error('  2. Check https://notebooklm.google.com to see if the service is up');
+        console.error('  2. Check https://notebook.google.com to see if the service is up');
       } else if (errorMessage.includes('401') || errorMessage.includes('unauthorized')) {
         console.error('Authentication failed. Please check your credentials.');
         console.error('Try running with FORCE_REAUTH=true to refresh your authentication.');

@@ -38,7 +38,7 @@ def _parse_dotenv(path: Path) -> dict:
 def _fetch_auth_token(cookie_str: str) -> str:
     """Fetch a fresh SNlM0e CSRF token from the NotebookLM page using saved cookies."""
     req = urllib.request.Request(
-        "https://notebooklm.google.com/",
+        "https://notebook.google.com/",
         headers={
             "User-Agent": AUTH_USER_AGENT,
             "Cookie": cookie_str,
